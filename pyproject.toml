@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doc2md"
+version = "1.0.0"
+requires-python = ">=3.9"
+description = "确定性资料转换处理器: 原始资料 -> agent 友好的知识库"
+
+[project.scripts]
+doc2md = "doc2md.cli:main"
+
+[tool.setuptools]
+packages = ["doc2md", "doc2md.parsers"]

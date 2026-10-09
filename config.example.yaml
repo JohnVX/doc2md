@@ -1,0 +1,27 @@
+# 资料转换处理器配置 (可选; 不提供则用默认单类目, 全落 unclassified)
+# 类目体系完全自定义, 处理器不预设任何领域.
+
+# taxonomy: 声明有哪些类目 (不写则只有 default_category)
+taxonomy:
+  - architecture
+  - business
+  - threat-model
+  - attack-surface
+  - audit-playbook
+
+default_category: unclassified
+
+# 文件名 glob -> 类目 (mapping 优先级最高)
+mapping:
+  "xxx.pptx": attack-surface
+  "xxx.docx": threat-model
+  "xxx.docx": audit-playbook
+  "xxx.xlsx": audit-playbook
+
+# 关键词 -> 类目 (在 文件名+正文 命中数最多的类目胜出; mapping 未命中时用)
+keywords:
+  audit-playbook: [审计, 验收, 准出, 检查项]
+  attack-surface: [漏洞, exploit, 利用, 攻击面, 提权]
+  threat-model: [威胁, 风险, 建模, 踩内存, 越界]
+  architecture: [架构, 内核, 设计, 内存管理, 启动]
+  business: [业务, 需求, 场景, 评估]
