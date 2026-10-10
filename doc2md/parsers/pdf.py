@@ -7,13 +7,20 @@
   - find_tables() 抛异常时该页退化为仅文字层, 不整解析失败
   - 扫描页(无文字/表格/大纲): 渲染页为图 -> OCR
   - 文字页含内嵌图: 留 stage2 标记(图内文字未提取)
+
+不使用 pymupdf_layout (PyMuPDF 推广的增强布局分析包):
+  - 多栏阅读序/无框表格/版面分区属语义理解, 交 stage2 多模态大模型处理
+  - stage1 原则: 确定性提取 + 诚实标记; 文字从不丢失(顺序/格式不完美但内容完整)
+  - 该包 API 稳定性/跨平台/维护活跃度未知, 加不确定依赖违背确定性设计意图
 """
+import contextlib
+import io
+import logging
 from pathlib import Path
 
 from .. import ocr, util
 from ._common import defer, md_table
 
-import logging
 log = logging.getLogger("pdf")
 
 
@@ -83,18 +90,20 @@ def _page_segments(fpage):
     """返回 [(y, type, md), ...] 该页的表格/文字/标题段."""
     segs = []
     # 表格 (fitz find_tables; 抛异常则该页无表格)
+    # redirect_stdout: 压掉 PyMuPDF 推广 pymupdf_layout 的 stdout 信息 (见模块 docstring)
     tables = []
     try:
-        for tb in fpage.find_tables().tables:
-            ext = tb.extract()
-            if not ext:
-                continue
-            rows = [[("" if c is None else str(c)) for c in r] for r in ext]
-            nrows = len(rows)
-            ncols = max((len(r) for r in rows), default=0)
-            if nrows < 2 or ncols < 2:
-                continue  # 过滤伪表 (页眉/单列等)
-            tables.append((tb.bbox, rows, ncols))
+        with contextlib.redirect_stdout(io.StringIO()):
+            for tb in fpage.find_tables().tables:
+                ext = tb.extract()
+                if not ext:
+                    continue
+                rows = [[("" if c is None else str(c)) for c in r] for r in ext]
+                nrows = len(rows)
+                ncols = max((len(r) for r in rows), default=0)
+                if nrows < 2 or ncols < 2:
+                    continue  # 过滤伪表 (页眉/单列等)
+                tables.append((tb.bbox, rows, ncols))
     except Exception:
         pass
 
