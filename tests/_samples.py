@@ -34,7 +34,7 @@ def gen_pptx(path):
 
 
 def gen_pdf(path):
-    import fitz
+    import pymupdf as fitz
     doc = fitz.open()
     p = doc.new_page()
     p.insert_text((50, 72), "Hello 样本 PDF")

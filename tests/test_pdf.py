@@ -14,7 +14,7 @@ CASES = []
 
 
 def _gen_pdf_with_outline(path):
-    import fitz
+    import pymupdf as fitz
     doc = fitz.open()
     doc.new_page().insert_text((50, 72), "正文内容")
     doc.set_toc([[1, "第一章 概述", 1], [2, "1.1 背景", 1]])  # [级别,标题,页码]
@@ -47,7 +47,7 @@ def test_scan_page_ocr():
     try:
         in_dir = make_tmp_input()
         p = os.path.join(in_dir, "scanned.pdf")
-        import fitz
+        import pymupdf as fitz
         doc = fitz.open()
         page = doc.new_page()
         page.insert_image(page.rect, stream=open(png, "rb").read())  # 仅图, 无文字层
@@ -79,7 +79,7 @@ def test_inline_image_marker_on_text_page():
     try:
         in_dir = make_tmp_input()
         p = os.path.join(in_dir, "mixed.pdf")
-        import fitz
+        import pymupdf as fitz
         doc = fitz.open()
         page = doc.new_page()
         page.insert_text((50, 72), "BodyText123")  # 有文字层(用拉丁文, fitz 内置字体可靠渲染)
@@ -102,7 +102,7 @@ CASES.append(("inline_image_marker_on_text_page", test_inline_image_marker_on_te
 
 def test_pdf_table_detection_failure_degrades():
     """fitz find_tables 抛异常时, 文字层仍应提取, 不整体解析失败(回归)."""
-    import fitz
+    import pymupdf as fitz
     in_dir = make_tmp_input()
     p = os.path.join(in_dir, "t.pdf")
     doc = fitz.open()

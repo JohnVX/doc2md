@@ -12,7 +12,7 @@ CASES = []
 
 def test_pdf_table_extracted():
     """PDF 含表格 -> fitz 提取, md 有 markdown 表格."""
-    import fitz
+    import pymupdf as fitz
     import tempfile
     tmp = tempfile.mkdtemp()
     pdf_path = os.path.join(tmp, "table.pdf")

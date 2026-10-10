@@ -19,7 +19,7 @@ log = logging.getLogger("pdf")
 
 def parse(path, ctx=None):
     """PDF 解析入口(fitz 文字+表格+大纲+扫描页)."""
-    import fitz
+    import pymupdf as fitz
 
     stem = Path(path).stem
     doc = None
