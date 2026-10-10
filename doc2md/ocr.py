@@ -1,9 +1,10 @@
 """OCR 封装: rapidocr-onnxruntime 单例 + import 检测 + 无引擎时兜底 defer.
 
 通用, 不针对任何具体图片内容. img 可为路径或 bytes.
-OMP_NUM_THREADS=1: 限制 ONNX Runtime 每次推理用 1 线程,
-并行由 pipeline 的 ThreadPool 提供 (线程安全, 共享单实例引擎零额外内存).
-不设此值时 ONNX 默认用 cpu_count 线程, N 个 OCR 线程 × cpu_count = 线程爆炸.
+OMP_NUM_THREADS=1: 限制 ONNX Runtime 每次推理用 1 线程 (Linux/OpenMP 有效).
+_intra_op_single: monkey-patch InferenceSession, 注入 sess_options
+intra_op_num_threads=1 (Windows 上 OMP_NUM_THREADS 无效, 必须改 session 选项).
+并行由 pipeline 的 ThreadPool 提供 (ONNX run() 线程安全, 共享单实例引擎).
 """
 import logging
 import os
@@ -32,6 +33,35 @@ def available():
     return _probed and not _broken
 
 
+def _intra_op_single():
+    """限制 ONNX Runtime 每次推理用 1 线程 (Windows 上 OMP_NUM_THREADS 无效).
+
+    monkey-patch ort.InferenceSession, 自动注入 sess_options
+    (intra_op_num_threads=1, inter_op_num_threads=1).
+    在 import rapidocr 之前调用, 确保 rapidocr 创建 session 时走 patched 版.
+    """
+    try:
+        import onnxruntime as ort
+        if getattr(ort.InferenceSession, "_d2m_patched", False):
+            return
+        _orig = ort.InferenceSession
+
+        class _SingleThread(_orig):
+            _d2m_patched = True
+
+            def __init__(self, *args, **kwargs):
+                if "sess_options" not in kwargs:
+                    opts = ort.SessionOptions()
+                    opts.intra_op_num_threads = 1
+                    opts.inter_op_num_threads = 1
+                    kwargs["sess_options"] = opts
+                super().__init__(*args, **kwargs)
+
+        ort.InferenceSession = _SingleThread
+    except Exception:
+        pass
+
+
 def _engine_obj():
     """惰性初始化并返回 OCR 引擎单例; 失败缓存 _broken 不再重试."""
     global _engine, _broken
@@ -40,6 +70,7 @@ def _engine_obj():
     if _engine is None:
         with _lock:
             if _engine is None:
+                _intra_op_single()
                 try:
                     from rapidocr_onnxruntime import RapidOCR
                     _engine = RapidOCR()
