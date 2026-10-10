@@ -81,9 +81,9 @@ def _detect_resources():
             except Exception:
                 pass
 
-    max_workers = min(cpus * 2, max(1, avail_mb // 500), 8)
     ocr_budget = max(0, int(avail_mb * 0.8) - 1024)
     max_ocr = min(max(1, int(cpus * 0.8)), max(1, ocr_budget // 200))
+    max_workers = min(cpus * 2, max(1, avail_mb // 500), 8, max(1, int(cpus * 0.8) - max_ocr))
     return max_workers, max_ocr, cpus, avail_mb
 
 
