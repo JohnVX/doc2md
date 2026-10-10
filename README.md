@@ -13,9 +13,10 @@
 `doc2md` 解决的是「**把异构资料统一成 agent 可消费的资料系统**」这件事——
 
 - **统一格式**：全部输出为 Markdown，带 YAML front-matter 元数据。
-- **统一索引**：全局 `catalog.yaml` 列出每份资料的 id / 标题 / 类目 / 来源 / 摘要 / 章节索引（level + 锚点），agent 据此定位再读正文。
+- **统一索引**：全局 `catalog.yaml` 列出每份资料的 id / 标题 / 类目 / 来源 / 摘要，agent 据此定位再读正文；章节结构在 md 正文里（标题锚点 + 长 md 顶部渲染目录）。
 - **去噪 + 提取**：每种格式用对应工具解析，去样板噪声，提取正文、表格、图片中的文字（OCR）。
 - **确定性与可复现**：同一输入产出同一结果；doc-id 由源文件相对路径哈希生成，跨平台稳定不漂移。
+- **并行加速**：多文件解析自动并行（ProcessPool，上限 4），输出顺序按文件名排序不受进程影响，确定性不变。
 - **不预设领域**：类目体系完全由配置定义，换一份 `config.yaml` 即可从「安全审计」切到「法规」「产品手册」等任何领域，代码不动。
 - **不依赖大模型**：分类、摘要、标题选取全用规则与抽取式，OCR 用本地引擎。
 
@@ -59,7 +60,7 @@
 
 - **分类**：`mapping`（文件名 glob 精确）优先 → `keywords`（文件名+正文命中数最多者胜出）→ 默认类目。无配置时全落 `unclassified`。
 - **摘要**：抽取式——首个像正文的段，截断 200 字。
-- **章节索引**：全量提取正文标题（level + title + 锚点），写入 catalog 的 `sections` 字段——agent 可定位到章节级。front-matter 的 `toc` 取前 10 作概览；正文标题 ≥6 个时在 md 顶部渲染 `## 目录`（链接锚点，前 30）。
+- **章节索引**：正文标题 ≥6 个时在 md 顶部渲染 `## 目录`（链接锚点，前 30），agent 打开文档即可定位到章节级。catalog/manifest 不重复存储章节结构——它已在 md 正文里。
 
 ---
 
@@ -79,7 +80,7 @@
 ```
 
 两个索引文件**各自标明面向对象与需求边界，零重叠**：
-- **catalog.yaml**（面向：业务 agent）— 纯导航索引。按类目/标题/摘要/章节定位文档。每文档的 `deferred` 字段为上下文（"这篇有未处理项"），不是工作单。
+- **catalog.yaml**（面向：业务 agent）— 纯导航索引。按类目/标题/摘要定位文档。每文档的 `deferred` 字段为上下文（"这篇有未处理项"），不是工作单。章节结构不重复存储——打开 md 文件即见标题 + 目录渲染。
 - **handoff.yaml**（面向：仅 stage2 agent）— 交接说明 + 工作项。stage2 agent 读此一处即获取全部：producer 身份、stage1 做了/没做什么、defer 类型处理契约、输出指南、目录布局、`stage2_pending` 具体工作项。业务 agent 不需要读此文件。
 
 ### front-matter（每个 md 头部）
@@ -116,11 +117,6 @@ documents:                  # 全量文档明细
     doc: docs/attack-surface/doc-a3348d73.md
     summary: NPU漏洞利用
     tags: []
-    toc: [NPU漏洞利用, Slide 2, ...]
-    sections:                  # 章节级索引(全量标题, 带 level/anchor)
-      - {level: 2, title: "NPU漏洞利用", anchor: slide-1-npu漏洞利用}
-      - {level: 2, title: "Slide 2", anchor: slide-2}
-      ...
     deferred:                  # 每文档上下文 (仅有待处理项时出现; 聚合工作单在 handoff.yaml)
       - {type: chart, count: 2, note: 图表/SmartArt等未提取}
 ```
@@ -159,7 +155,7 @@ stage2_pending:                # 聚合工作单 (仅 stage2 agent 需要; 无�
 ```
 
 **agent 用法**：
-- **业务 agent**：读 `catalog.yaml` 按类目/标题/摘要/**sections 章节锚点**定位到某份 `doc`（可深链到 `docs/<cat>/<id>.md#<锚点>` 的具体章节，不必整篇读），再读对应 md 正文；需要原图/原表时回 `original-doc/`。
+- **业务 agent**：读 `catalog.yaml` 按类目/标题/摘要定位到某份 `doc`，再读对应 md 正文（正文标题即章节锚点，可深链 `docs/<cat>/<id>.md#<锚点>` 到具体章节）；需要原图/原表时回 `original-doc/`。
 - **stage2 agent**：读 `handoff.yaml` 一处即获取全部——背景、契约、`stage2_pending` 工作项、输出指南。按工作项逐个处理，**四处同步更新**（md body 替换标记、front-matter deferred、catalog deferred、handoff stage2_pending），保持全链一致。
 
 `doc-id` = `doc-` + sha256(源文件相对路径)[:8]，稳定可复现。
@@ -269,7 +265,7 @@ pip install -r requirements.txt
 | 库 | 用途 |
 |---|---|
 | python-docx / python-pptx / openpyxl | Office 解析 |
-| PyMuPDF (fitz) / pdfplumber | PDF 文字层/大纲/渲染 + 表格抽取 |
+| PyMuPDF (fitz) | PDF 文字层/大纲/渲染/表格抽取 |
 | Pillow | 图像 |
 | PyYAML | config/manifest/catalog/front-matter |
 | rapidocr-onnxruntime | OCR（可选增强；不装则图片 defer） |
@@ -320,7 +316,7 @@ ai-doc2md/
 │   ├── config.py          # 配置加载 + 通用分类
 │   ├── manifest.py        # 增量 manifest
 │   ├── catalog.py         # catalog.yaml + handoff.yaml 生成
-│   ├── pipeline.py        # 主流程编排
+│   ├── pipeline.py        # 主流程编排 (三阶段: 串行预处理→并行解析→串行收尾)
 │   ├── cli.py             # CLI + 跨平台适配
 │   ├── util.py            # 工具函数
 │   └── parsers/           # 各格式解析器（md/text/image/xlsx/docx/pptx/pdf）
@@ -340,7 +336,7 @@ python tests/run_all.py          # 退出码 0=全过，1=有失败
 python tests/run_all.py -v        # 详细（含失败堆栈）
 ```
 
-覆盖：格式识别（含扩展名改错诱饵+多编码）、各格式解析输出正确性（docx 表格图/有序列表/公式标记/图表标记、pptx 分组递归、pdf 大纲/扫描页/表格/降级、xlsx 公式/合并展开/截断、md 内嵌图/远程图片跳过/无H1 fallback、image OCR 正向/纯图无文字defer）、去噪（toc/summary 围栏感知/clean_text/strip_boilerplate/空summary）、config 容错、分类优先级（mapping>keywords>default）、路径校验、空/二进制/旧 office、大文件、损坏 pdf/docx/xlsx/pptx/图片、OCR 失败缓存、中断保存、增量全链路（跳过/新增/重处理/删除清理/同时增删改/3次以上/删除恢复doc-id/配置变更重分类/格式变 defer/重分类剪枝/旧 assets 清理）、deferred 结构化（front-matter/catalog 每文档上下文/标记正则/聚合/多type同文档/标记位置/无defer不噪声/stage2_pending 在 handoff 不在 catalog/handoff 完整性/面向对象注释）、零参数模式（自动定位输入/输出/config/增量重跑/config在输入目录/嵌套子目录/move后空/输出自动创建/排除输出目录/多候选选最多/混用参数/无文档报错）、--move、多格式混合端到端、原件保留验证、catalog 章节索引+front-matter 合法性、doc-id 稳定性。
+覆盖：格式识别（含扩展名改错诱饵+多编码）、各格式解析输出正确性（docx 表格图/有序列表/公式标记/图表标记、pptx 分组递归、pdf 大纲/扫描页/表格/降级、xlsx 公式/合并展开/截断、md 内嵌图/远程图片跳过/无H1 fallback、image OCR 正向/纯图无文字defer）、去噪（toc/summary 围栏感知/clean_text/strip_boilerplate/空summary）、config 容错、分类优先级（mapping>keywords>default）、路径校验、空/二进制/旧 office、大文件、损坏 pdf/docx/xlsx/pptx/图片、OCR 失败缓存、中断保存、增量全链路（跳过/新增/重处理/删除清理/同时增删改/3次以上/删除恢复doc-id/配置变更重分类/格式变 defer/重分类剪枝/旧 assets 清理）、deferred 结构化（front-matter/catalog 每文档上下文/标记正则/聚合/多type同文档/标记位置/无defer不噪声/stage2_pending 在 handoff 不在 catalog/handoff 完整性/面向对象注释）、零参数模式（自动定位输入/输出/config/增量重跑/config在输入目录/嵌套子目录/move后空/输出自动创建/排除输出目录/多候选选最多/混用参数/无文档报错）、--move、多格式混合端到端、原件保留验证、catalog 精简无 toc/sections + md 目录渲染 + front-matter 合法性、并行处理（两次运行确定性/10文件顺序不受进程影响/混合格式正确）、doc-id 稳定性。
 
 ---
 

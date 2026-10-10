@@ -13,6 +13,7 @@ log = logging.getLogger("config")
 
 class Config:
     def __init__(self, data=None):
+        """从 dict 构建分类配置; 无参时全落 default_category."""
         data = data or {}
         self.default_category = data.get("default_category") or "unclassified"
         taxonomy = data.get("taxonomy")
@@ -28,6 +29,7 @@ class Config:
                 log.warning("keywords 类目 %r 不在 taxonomy", cat)
 
     def classify(self, filename, text=""):
+        """分类: mapping(glob) 优先 -> keywords(命中数最多) -> default."""
         base = filename
         # 1) mapping (glob, 大小写不敏感)
         for pat, cat in self.mapping.items():
@@ -45,10 +47,12 @@ class Config:
         return self.default_category
 
     def categories_set(self):
+        """返回所有合法类目集合 (含 default)."""
         return set(self.categories) | {self.default_category}
 
 
 def load_config(path):
+    """加载 YAML 配置; 不存在/语法错误时回退默认配置."""
     if not path:
         return Config()
     try:

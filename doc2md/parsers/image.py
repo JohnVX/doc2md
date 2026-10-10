@@ -11,6 +11,7 @@ from ._common import defer
 
 
 def parse(path, ctx=None):
+    """图片解析入口(OCR 或 defer)."""
     ctx = ctx or {}
     stem = Path(path).stem
     rel = ctx.get("relpath") or os.path.basename(path)

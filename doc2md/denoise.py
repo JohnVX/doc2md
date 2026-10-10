@@ -45,6 +45,7 @@ def strip_boilerplate(text):
 
 
 def _is_fence(line):
+    """检测是否在围栏代码块内."""
     s = line.strip()
     return s.startswith("```") or s.startswith("~~~")
 
@@ -58,6 +59,7 @@ def extract_summary(text, maxlen=200):
     para = []
 
     def emit(p):
+        """发射一行文本到输出(跳过围栏内标题)."""
         if not p:
             return None
         if all(re.match(r'^\s*(?:[-*+]\s|\d+\.\s)', ln) for ln in p):

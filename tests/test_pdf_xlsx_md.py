@@ -11,7 +11,7 @@ CASES = []
 
 
 def test_pdf_table_extracted():
-    """PDF 含表格 -> pdfplumber 提取, md 有 markdown 表格."""
+    """PDF 含表格 -> fitz 提取, md 有 markdown 表格."""
     import fitz
     import tempfile
     tmp = tempfile.mkdtemp()

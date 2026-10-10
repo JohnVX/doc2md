@@ -1,11 +1,15 @@
-"""主流程: 扫描输入 -> 识别 -> 解析 -> 去噪 -> 分类 -> 落 md + 拷原文件 -> 目录 -> 增量.
+"""主流程: 扫描输入 -> 识别 -> [并行解析] -> 去噪 -> 分类 -> 落 md + 拷原文件 -> 目录 -> 增量.
 
+三阶段: serial 预处理(检测/sha/跳过/重分类) -> parallel 解析(ProcessPool, 进程隔离) -> serial 收尾.
+用 ProcessPool 而非 ThreadPool: fitz.Page.find_tables() 在 C 层有全局状态, 线程不安全.
 parser 返回的 deferred (结构化 stage2 待处理项) 经 aggregate_deferred 合并后
 写入 front-matter / manifest / catalog, 供 stage2 agent 编程查询.
 """
 import logging
 import re
 import shutil
+import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import yaml
@@ -17,6 +21,31 @@ from .parsers._common import aggregate_deferred, defer
 log = logging.getLogger("pipeline")
 
 LARGE_FILE_MB = 50  # 超过此值给出慢速警告
+MAX_WORKERS = 4     # 并行解析进程上限 (内存安全: 3.7GB 环境)
+
+
+def _parse_failure(p, rel, ex):
+    """解析失败时构造 defer 占位. 返回 parsed dict."""
+    msg = str(ex).lower()
+    if "encrypt" in msg or "password" in msg:
+        log.error("文档可能加密, 跳过解析 %s: %s", rel, ex)
+    else:
+        log.error("解析失败 %s: %s", rel, ex)
+    deferred_list = []
+    return {
+        "title": p.stem,
+        "body": defer(deferred_list, "parse-failed", 1, f"{ex}; 见 original-doc/{rel}"),
+        "tags": [], "meta": {},
+        "deferred": deferred_list,
+    }
+
+
+def _parse_worker(handler, path_str, ctx_dict):
+    """子进程解析入口: 返回 (parsed, elapsed_seconds). 异常不捕获, 由调用方处理."""
+    from doc2md import parsers
+    t0 = time.time()
+    result = parsers.get(handler)(path_str, ctx_dict)
+    return result, time.time() - t0
 
 
 def _reclassify(out, man, conf, rel, old_entry, new_cat):
@@ -69,11 +98,12 @@ def _prune_entry(man, out, rel, entry):
         del man.entries[rel]
 
 
-def _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed):
+def _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time=0.0):
     """公共收尾(支持格式与 defer 共用): 去噪/分类/重分类清理/拷原文件/side files/写 md/入 manifest.
 
     返回 "ok" 或 "write_fail"(写 md 失败, 调用方计 errors 且不入 manifest).
     """
+    t0 = time.time()
     body = denoise.clean_text(parsed["body"])
     body = denoise.strip_boilerplate(body)
     title = parsed.get("title") or p.stem
@@ -114,7 +144,6 @@ def _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed):
 
     summary = denoise.extract_summary(body)
     sections = denoise.extract_sections(body)
-    toc = [s["title"] for s in sections[:10]]
     deferred = aggregate_deferred(parsed.get("deferred", []))
     # 长 md 顶部渲染目录(导航概览, 链接到章节锚点); 短文档不加
     if len(sections) >= 6:
@@ -137,19 +166,53 @@ def _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed):
         "relpath": rel, "sha256": sha, "id": doc_id, "title": title,
         "category": category, "source": doc["source"], "source_type": doc["source_type"],
         "doc_path": f"docs/{category}/{doc_id}.md", "summary": summary,
-        "tags": doc["tags"], "toc": toc, "deferred": deferred,
-        "sections": [{"level": s["level"], "title": s["title"],
-                      "anchor": util.heading_slug(s["title"])} for s in sections],
+        "tags": doc["tags"], "deferred": deferred,
     })
-    log.info("处理: %s -> docs/%s/%s.md", rel, category, doc_id)
+    log.info("处理: %s -> docs/%s/%s.md (%.1fs)", rel, category, doc_id,
+             parse_time + (time.time() - t0))
     return "ok"
 
 
+def _handle_empty(man, out, rel, move):
+    """空文件: 跳过并清理旧条目. 返回 (unsupported_delta, purged_delta)."""
+    log.warning("跳过空文件: %s", rel)
+    purged = 0
+    if not move:
+        old = man.entries.get(rel)
+        if old:
+            _prune_entry(man, out, rel, old)
+            purged = 1
+    return 1, purged
+
+
+def _try_reclassify(out, man, conf, p, rel):
+    """sha 未变时检查配置变更是否需重分类."""
+    old_entry = man.entries.get(rel)
+    if not old_entry:
+        return
+    text = old_entry.get("title", "") + "\n" + old_entry.get("summary", "")
+    new_cat = conf.classify(p.name, text)
+    old_cat = old_entry.get("category", conf.default_category)
+    if new_cat != old_cat:
+        _reclassify(out, man, conf, rel, old_entry, new_cat)
+
+
+def _clear_old_assets(out, doc_id):
+    """清理该 doc 的旧 assets 目录, 避免旧版图残留."""
+    old_assets = out / "original-doc" / f"{doc_id}_assets"
+    if old_assets.exists():
+        shutil.rmtree(old_assets, ignore_errors=True)
+
+
 def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
+    """主流程入口: 路径校验 -> 三阶段处理 -> 清理 + 索引.
+
+    返回 (processed, skipped, errors). 中断时保存已处理部分.
+    """
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
-    # 压掉 pdfminer/pdfplumber 的内部噪声 (FontBBox 等), 只留 ERROR
-    for noisy in ("pdfminer", "pdfminer.six", "pdfplumber", "PIL"):
+    # 压掉 pdfminer/PIL 的内部噪声 (FontBBox 等), 只留 ERROR
+    for noisy in ("pdfminer", "pdfminer.six", "PIL"):
         logging.getLogger(noisy).setLevel(logging.ERROR)
 
     # --- 路径校验 ---
@@ -181,6 +244,11 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
         log.warning("输入目录为空, 无文件可处理: %s", in_dir)
 
     processed = skipped = errors = unsupported = purged = deferred = 0
+    parse_items = []   # (p, info, rel, sha, doc_id, ctx, handler) — 需并行解析
+    finalize_items = []  # (p, info, rel, sha, doc_id, parsed, is_error) — 无需解析, 直接收尾
+
+    # === 阶段 1: 串行预处理 (检测/sha/跳过/重分类/不支持格式) ===
+    interrupted = False
     try:
         for p in files:
             info = detector.detect(str(p))
@@ -191,24 +259,14 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
 
             if handler is None or parsers.get(handler) is None:
                 if info["format"] == "empty":
-                    # 空文件: 无内容, 跳过(并清理可能的旧条目)
-                    log.warning("跳过空文件: %s", p.name)
-                    unsupported += 1
-                    if not move:
-                        old0 = man.entries.get(rel)
-                        if old0:
-                            _prune_entry(man, out, rel, old0)
-                            purged += 1
+                    u, pu = _handle_empty(man, out, rel, move)
+                    unsupported += u
+                    purged += pu
                     continue
-                # 非空但不支持格式(旧 office/二进制/损坏 zip 等):
-                # 仍复制原件 + 建 defer md 进 catalog, 让 stage2 接手(不静默丢弃)
                 if not move and man.is_unchanged(rel, sha):
                     skipped += 1
                     continue
-                # 若该 doc 之前是支持格式(留有 assets), 清掉避免孤儿
-                old_assets = out / "original-doc" / f"{doc_id}_assets"
-                if old_assets.exists():
-                    shutil.rmtree(old_assets, ignore_errors=True)
+                _clear_old_assets(out, doc_id)
                 deferred_list = []
                 parsed = {
                     "title": p.stem,
@@ -219,60 +277,88 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
                 }
                 deferred += 1
                 log.info("defer(stage2): %s (format=%s)", rel, info["format"])
+                finalize_items.append((p, info, rel, sha, doc_id, parsed, False))
             else:
                 if man.is_unchanged(rel, sha):
-                    # sha 未变但 config 可能变了: 用已存 title+summary 重判类目
-                    old_entry = man.entries.get(rel)
-                    if old_entry:
-                        reclassify_text = (old_entry.get("title", "") + "\n"
-                                           + old_entry.get("summary", ""))
-                        new_cat = conf.classify(p.name, reclassify_text)
-                        old_cat = old_entry.get("category", conf.default_category)
-                        if new_cat != old_cat:
-                            _reclassify(out, man, conf, rel, old_entry, new_cat)
+                    _try_reclassify(out, man, conf, p, rel)
                     skipped += 1
                     continue
                 ctx = dict(info.get("meta", {}))
                 ctx.update({"relpath": rel, "doc_id": doc_id, "output_root": out})
-                # 大文件提示
                 try:
                     size = p.stat().st_size
                 except OSError:
                     size = 0
                 if size > LARGE_FILE_MB * 1024 * 1024:
                     log.warning("大文件(%d MB), 解析可能较慢: %s", size // (1024 * 1024), rel)
-                # 重新处理: 先清掉该 doc 旧 assets 目录, 避免旧版图残留(parser 会重建)
-                old_assets = out / "original-doc" / f"{doc_id}_assets"
-                if old_assets.exists():
-                    shutil.rmtree(old_assets, ignore_errors=True)
-                try:
-                    parsed = parsers.get(handler)(str(p), ctx)
-                except Exception as ex:
-                    msg = str(ex).lower()
-                    if "encrypt" in msg or "password" in msg:
-                        log.error("文档可能加密, 跳过解析 %s: %s", rel, ex)
-                    else:
-                        log.error("解析失败 %s: %s", rel, ex)
-                    errors += 1
-                    deferred_list = []
-                    parsed = {
-                        "title": p.stem,
-                        "body": defer(deferred_list, "parse-failed", 1,
-                                       f"{ex}; 见 original-doc/{rel}"),
-                        "tags": [], "meta": {},
-                        "deferred": deferred_list,
-                    }
+                _clear_old_assets(out, doc_id)
+                parse_items.append((p, info, rel, sha, doc_id, ctx, handler))
+    except KeyboardInterrupt:
+        interrupted = True
+        log.warning("收到中断信号 (扫描阶段), 保存已处理部分并退出...")
 
-            # 公共收尾(支持格式 / defer / 解析失败占位 都走这里)
+    # === 阶段 2: 并行解析 (ProcessPool; 进程隔离: fitz find_tables 线程不安全, 必须进程级隔离) ===
+    parse_results = {}  # rel -> (parsed, is_error, parse_time)
+    if not interrupted and parse_items:
+        max_workers = min(MAX_WORKERS, len(parse_items))
+        pool = ProcessPoolExecutor(max_workers=max_workers)
+        future_map = {}
+        for item in parse_items:
+            p, info, rel, sha, doc_id, ctx, handler = item
+            future_map[rel] = pool.submit(_parse_worker, handler, str(p), ctx)
+        try:
+            for item in parse_items:
+                p, info, rel, sha, doc_id, ctx, handler = item
+                future = future_map[rel]
+                if interrupted and not future.done():
+                    future.cancel()
+                    continue
+                try:
+                    parsed, parse_time = future.result()
+                    parse_results[rel] = (parsed, False, parse_time)
+                except KeyboardInterrupt:
+                    interrupted = True
+                except Exception as ex:
+                    parsed = _parse_failure(p, rel, ex)
+                    errors += 1
+                    parse_results[rel] = (parsed, True, 0.0)
+        except KeyboardInterrupt:
+            interrupted = True
+        finally:
+            for f in future_map.values():
+                f.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+        if interrupted:
+            log.warning("收到中断信号 (解析阶段), 保存已处理部分并退出...")
+
+    # === 阶段 3: 串行收尾 (按原排序, 确定性输出) ===
+    try:
+        for item in parse_items:
+            p, info, rel, sha, doc_id, ctx, handler = item
+            if rel not in parse_results:
+                continue
+            parsed, is_error, parse_time = parse_results[rel]
+            if is_error:
+                deferred += 1
+                log.info("defer(stage2): %s (parse-failed)", rel)
+            status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
+            if status == "write_fail":
+                errors += 1
+            else:
+                processed += 1
+
+        for item in finalize_items:
+            p, info, rel, sha, doc_id, parsed, is_error = item
             status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed)
             if status == "write_fail":
                 errors += 1
             else:
                 processed += 1
     except KeyboardInterrupt:
-        log.warning("收到中断信号, 保存已处理部分并退出...")
+        interrupted = True
+        log.warning("收到中断信号 (收尾阶段), 保存已处理部分并退出...")
 
-    # 清理: 输入已删除的文件 (--move 模式输入本就被消费空, 不清理)
+    # === 阶段 4: 清理 + 保存 + 生成索引 ===
     if not move:
         for rp in list(man.entries):
             if rp in current_rels:

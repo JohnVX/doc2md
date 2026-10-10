@@ -13,6 +13,7 @@ from ._common import defer, is_placeholder, md_table
 
 
 def parse(path, ctx=None):
+    """pptx 解析入口(分组递归+图片OCR)."""
     from pptx import Presentation
     from pptx.enum.shapes import MSO_SHAPE_TYPE
     prs = Presentation(path)
@@ -53,6 +54,7 @@ def _walk(shapes):
 
 
 def _slide_title(slide):
+    """取幻灯片标题."""
     try:
         t = slide.shapes.title
         if t is not None and t.text.strip():
@@ -67,6 +69,7 @@ def _slide_title(slide):
 
 
 def _render_slide(idx, slide, ctx, deferred):
+    """渲染一张幻灯片为 md."""
     title = _slide_title(slide)
     head = f"## Slide {idx}" + (f": {title}" if title else "")
     title_shape = None
@@ -114,6 +117,7 @@ def _render_slide(idx, slide, ctx, deferred):
 
 
 def _fmt_textframe(tf):
+    """格式化文本框为 md 段落."""
     out = []
     for para in tf.paragraphs:
         t = "".join(r.text or "" for r in para.runs) or para.text
@@ -129,6 +133,7 @@ def _fmt_textframe(tf):
 
 
 def _render_table(tbl):
+    """渲染 pptx 表格为 md 表格."""
     try:
         ncols = len(tbl.columns)
     except Exception:
@@ -143,6 +148,7 @@ def _render_table(tbl):
 
 
 def _handle_picture(sh, no, ctx, items, deferred):
+    """处理图片形状: 提取+OCR+defer."""
     try:
         blob = sh.image.blob
         ext = (sh.image.ext or "png").lstrip(".")

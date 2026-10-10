@@ -1,6 +1,8 @@
 """catalog.yaml + handoff.yaml 生成.
 
 catalog.yaml — 资料库导航索引 (面向: 业务 agent 定位文档; 每文档含 deferred 上下文).
+  导航字段: id/title/category/source/source_type/doc/summary/tags.
+  章节结构不重复存储——md body 已含标题 + 长 md 顶部有渲染目录.
 handoff.yaml  — stage1→stage2 交接说明 + stage2_pending 工作项 (面向: 仅 stage2 agent).
 """
 import copy
@@ -16,7 +18,7 @@ log = logging.getLogger("catalog")
 
 _CATALOG_HEADER = (
     "# catalog.yaml — 资料库导航索引\n"
-    "# 面向: 业务 agent (按类目/标题/摘要/章节定位文档)\n"
+    "# 面向: 业务 agent (按类目/标题/摘要定位文档; 章节结构见各 md 文件目录)\n"
     "# 每文档的 deferred 字段为上下文(该文档有哪些未处理项); 聚合工作单在 handoff.yaml\n"
     "# stage2 agent 请先读 index/handoff.yaml 获取交接说明与工作项\n\n"
 )
@@ -39,7 +41,7 @@ _HANDOFF_STATIC = {
         "OCR (rapidocr, 中英文, 可选; 成功的已写入正文)",
         "去噪 (空行/页码/样板)",
         "分类 (配置驱动 taxonomy/mapping/keywords)",
-        "章节索引 (level + title + anchor, 可深链定位)",
+        "章节索引 (md 正文渲染 ## 目录, 锚点深链)",
         "增量处理 (sha256 manifest, 未变跳过)",
     ],
     "stage1_not_done": [
@@ -154,8 +156,6 @@ def build_catalog(entries, output_root):
             "doc": e.get("doc_path", ""),
             "summary": e.get("summary", ""),
             "tags": e.get("tags", []) or [],
-            "toc": e.get("toc", []) or [],
-            "sections": e.get("sections", []) or [],
         }
         if deferred:
             doc["deferred"] = deferred

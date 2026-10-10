@@ -88,6 +88,7 @@ def _print_auto(items):
 
 
 def main(argv=None):
+    """CLI 入口: 解析参数、自动检测、调用 pipeline."""
     _utf8_stdio()
     ap = argparse.ArgumentParser(
         prog="doc2md",

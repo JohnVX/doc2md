@@ -51,6 +51,7 @@ _PLACEHOLDER = re.compile(
 
 
 def is_placeholder(text):
+    """检测是否为母版占位符文本."""
     s = text.strip().lower()
     if not s:
         return True
@@ -67,9 +68,11 @@ def md_table(rows, ncols=None):
         return ""
 
     def esc(c):
+        """转义表格单元格特殊字符."""
         return str(c).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").strip()
 
     def pad(r):
+        """补齐行到 ncols 列."""
         r = list(r) + [""] * (ncols - len(r))
         return [esc(c) for c in r[:ncols]]
 

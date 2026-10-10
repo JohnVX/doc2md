@@ -24,8 +24,10 @@ REGISTRY = {
 
 
 def get(handler_key):
+    """按 handler 名取解析函数."""
     return REGISTRY.get(handler_key)
 
 
 def supported():
+    """返回支持的 handler 名集合."""
     return set(REGISTRY)

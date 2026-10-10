@@ -27,6 +27,7 @@ def available():
 
 
 def _engine_obj():
+    """惰性初始化并返回 OCR 引擎单例; 失败缓存 _broken 不再重试."""
     global _engine, _broken
     if _broken:
         return None

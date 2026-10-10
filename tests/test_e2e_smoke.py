@@ -64,24 +64,27 @@ def test_front_matter_valid_and_consistent():
 CASES.append(("front_matter_valid_and_consistent", test_front_matter_valid_and_consistent))
 
 
-def test_catalog_has_sections_with_anchors():
-    """catalog 每文档应有 sections(全量标题, 带 level/anchor); 有标题的文档 sections 非空."""
+def test_catalog_lean_and_toc_rendered():
+    """catalog 不含 toc/sections (精简导航); >=6 标题的 md 顶部有渲染目录."""
     body = "# 概述\n\n正文\n\n## 章节一\n\na\n\n## 章节二\n\nb\n\n## 章节三\n\nc\n\n## 章节四\n\nd\n\n## 章节五\n\ne\n"
     in_dir = make_tmp_input({"note.md": body})
     out = make_tmp_output()
     pipeline.run(in_dir, out)
     cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
     doc = cat["documents"][0]
-    secs = doc.get("sections", [])
-    assert_true(len(secs) >= 6, f"应有 >=6 sections, 实得 {len(secs)}")
-    s0 = secs[0]
-    assert_true({"level", "title", "anchor"} <= set(s0.keys()), f"section 缺字段: {s0}")
-    assert_eq(s0["title"], "概述")
-    assert_true(s0["anchor"], "anchor 非空")
+    assert_true("toc" not in doc, "catalog 不应含 toc 字段")
+    assert_true("sections" not in doc, "catalog 不应含 sections 字段")
+    assert_true({"id", "title", "category", "source", "source_type", "doc", "summary", "tags"} <= set(doc.keys()),
+                 f"catalog 缺导航字段: {set(doc.keys())}")
     # >=6 标题的文档应有顶部目录
     txt = open(os.path.join(out, doc["doc"]), encoding="utf-8").read()
     assert_true("## 目录" in txt, ">=6 标题的文档应有顶部目录")
+    # manifest 也不应含 toc/sections
+    man = yaml.safe_load(open(os.path.join(out, "index", ".manifest.yaml"), encoding="utf-8"))
+    me = man["entries"][0]
+    assert_true("toc" not in me, "manifest 不应含 toc 字段")
+    assert_true("sections" not in me, "manifest 不应含 sections 字段")
     cleanup(in_dir, out)
 
 
-CASES.append(("catalog_has_sections_with_anchors", test_catalog_has_sections_with_anchors))
+CASES.append(("catalog_lean_and_toc_rendered", test_catalog_lean_and_toc_rendered))

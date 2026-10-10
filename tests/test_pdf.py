@@ -100,10 +100,9 @@ def test_inline_image_marker_on_text_page():
 CASES.append(("inline_image_marker_on_text_page", test_inline_image_marker_on_text_page))
 
 
-def test_pdf_degrades_without_pdfplumber():
-    """pdfplumber 打开失败时, fitz 仍应提取文字层, 不整体解析失败(回归)."""
+def test_pdf_table_detection_failure_degrades():
+    """fitz find_tables 抛异常时, 文字层仍应提取, 不整体解析失败(回归)."""
     import fitz
-    import pdfplumber
     in_dir = make_tmp_input()
     p = os.path.join(in_dir, "t.pdf")
     doc = fitz.open()
@@ -111,18 +110,18 @@ def test_pdf_degrades_without_pdfplumber():
     doc.save(p)
     doc.close()
 
-    def _raise(*a, **k):
-        raise RuntimeError("mock pdfplumber 失败")
-    orig = pdfplumber.open
-    pdfplumber.open = _raise
+    orig = fitz.Page.find_tables
+    def _raise(self, *a, **k):
+        raise RuntimeError("mock find_tables 失败")
+    fitz.Page.find_tables = _raise
     try:
         from doc2md.parsers import pdf as pdfp
         r = pdfp.parse(p, {"output_root": None})
         assert_true("FALLBACKTEXT99" in r["body"],
                     f"fitz 文字应保留(降级提取), body: {r['body'][:200]!r}")
     finally:
-        pdfplumber.open = orig
+        fitz.Page.find_tables = orig
     cleanup(in_dir)
 
 
-CASES.append(("pdf_degrades_without_pdfplumber", test_pdf_degrades_without_pdfplumber))
+CASES.append(("pdf_table_detection_failure_degrades", test_pdf_table_detection_failure_degrades))

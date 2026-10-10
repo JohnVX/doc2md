@@ -15,6 +15,7 @@ from ._common import defer, is_placeholder, md_table
 
 
 def parse(path, ctx=None):
+    """docx 解析入口(段落/表格/有序列表/图片/公式图表)."""
     import docx
     from docx.oxml.ns import qn
     d = docx.Document(path)
@@ -62,6 +63,7 @@ def parse(path, ctx=None):
 
 
 def _render_paragraph(p, d, ctx, deferred):
+    """渲染 docx 段落为 md."""
     style = (p.style.name if p.style else "") or ""
     sname = style.lower()
     text = _runs_md(p)
@@ -104,6 +106,7 @@ def _render_paragraph(p, d, ctx, deferred):
 
 
 def _runs_md(p):
+    """提取 run 级 markdown 文本."""
     # 合并相邻同样式(粗/斜)的 run, 避免产生 **** 杂讯
     segs = []  # [[bold, italic, text]]
     for r in p.runs:
@@ -177,6 +180,7 @@ def _list_info(p, d):
 
 
 def _has_numpr(p):
+    """检测段落是否有编号属性."""
     from docx.oxml.ns import qn
     pPr = p._element.find(qn("w:pPr"))
     if pPr is None:
@@ -211,6 +215,7 @@ def _para_images(p, d):
 
 
 def _render_table(tbl):
+    """渲染 docx 表格为 md 表格."""
     try:
         ncols = len(tbl.columns)
     except Exception:
@@ -225,6 +230,7 @@ def _render_table(tbl):
 
 
 def _extract_textboxes(d):
+    """提取文本框内容."""
     from docx.oxml.ns import qn
     out = []
     for tb in d.element.iter(qn("w:txbxContent")):

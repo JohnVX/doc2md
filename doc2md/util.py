@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 def sha256_file(path, chunk=1 << 20):
+    """流式计算文件 sha256 十六进制摘要."""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for b in iter(lambda: f.read(chunk), b""):
@@ -15,17 +16,20 @@ def sha256_file(path, chunk=1 << 20):
 
 
 def stable_doc_id(relpath):
+    """由源文件相对路径哈希生成稳定 doc-id (doc-xxxxxxxx)."""
     return "doc-" + hashlib.sha256(relpath.encode("utf-8")).hexdigest()[:8]
 
 
 _SLUG_RE = re.compile(r'[\\/:*?"<>|\s]+')
 
 def slugify(name):
+    """文件名 -> 安全 slug (去标点/空格转下划线)."""
     s = _SLUG_RE.sub("_", Path(name).stem).strip("_")
     return s or "doc"
 
 
 def relpath(path, base):
+    """计算 path 相对 base 的路径, 统一用 / 分隔."""
     try:
         return os.path.relpath(path, base).replace(os.sep, "/")
     except ValueError:

@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 def parse(path, ctx=None):
+    """text/csv/code 解析入口."""
     ctx = ctx or {}
     enc = ctx.get("encoding") or "utf-8"
     text = Path(path).read_text(encoding=enc, errors="replace")

@@ -106,6 +106,7 @@ def _load_merged_fill(path):
 
 
 def parse(path, ctx=None):
+    """xlsx 解析入口."""
     import openpyxl
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     title = None

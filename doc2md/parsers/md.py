@@ -14,6 +14,7 @@ _IMG_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
 
 
 def parse(path, ctx=None):
+    """markdown 解析入口(内嵌图片跟随+OCR)."""
     ctx = ctx or {}
     enc = ctx.get("encoding") or "utf-8"
     text = Path(path).read_text(encoding=enc, errors="replace")
@@ -36,6 +37,7 @@ def parse(path, ctx=None):
         asset_ref_prefix = f"../../original-doc/{doc_id}_assets/"
 
         def repl(m):
+            """re.sub 回调: 解析图片引用并跟随/OCR/defer."""
             alt, tgt = m.group(1), m.group(2).strip().split(" ")[0]
             if "://" in tgt or tgt.lower().startswith("data:") or tgt.startswith("#"):
                 return m.group(0)

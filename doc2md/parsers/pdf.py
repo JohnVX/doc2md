@@ -1,10 +1,10 @@
-"""PDF 解析: PyMuPDF(文字流+大纲+渲染扫描页) + pdfplumber(表格, 过滤伪表).
+"""PDF 解析: PyMuPDF (文字流+大纲+表格+渲染扫描页).
 
 通用:
   - 文字流: fitz blocks 按 (y,x) 排序 (改善多栏/阅读序)
   - 大纲: get_toc() 在对应页注入 # 级标题, 结构化 md
-  - 表格: pdfplumber find_tables(), 过滤伪表(列<2/行<2); 该表区文字从 blocks 剔除避免重复
-  - pdfplumber 打开失败时退化为仅文字层(无表格), 不整解析失败
+  - 表格: fitz find_tables(), 过滤伪表(列<2/行<2); 该表区文字从 blocks 剔除避免重复
+  - find_tables() 抛异常时该页退化为仅文字层, 不整解析失败
   - 扫描页(无文字/表格/大纲): 渲染页为图 -> OCR
   - 文字页含内嵌图: 留 stage2 标记(图内文字未提取)
 """
@@ -18,8 +18,8 @@ log = logging.getLogger("pdf")
 
 
 def parse(path, ctx=None):
+    """PDF 解析入口(fitz 文字+表格+大纲+扫描页)."""
     import fitz
-    import pdfplumber
 
     stem = Path(path).stem
     doc = None
@@ -43,44 +43,33 @@ def parse(path, ctx=None):
         for lvl, t, pg in toc:
             page_entries.setdefault(pg, []).append((lvl, t))
 
-        # pdfplumber 仅用于表格抽取; 失败则退化为仅文字层(fitz), 不让整解析失败
-        try:
-            pp = pdfplumber.open(path)
-        except Exception as e:
-            log.warning("pdfplumber 打开失败, 退化为仅文字层(无表格): %s", e)
-            pp = None
-        try:
-            n = doc.page_count
-            out = []
-            for i in range(n):
-                segs = []
-                for lvl, t in page_entries.get(i + 1, []):
-                    lvl = max(1, min(6, lvl))
-                    segs.append((0.0, "head", "#" * lvl + " " + t))
-                ppage = pp.pages[i] if (pp is not None and i < len(pp.pages)) else None
-                segs.extend(_page_segments(doc[i], ppage, ctx))
-                if not segs:
-                    # 无文字/表格/大纲 -> 扫描页, 渲染+OCR (不直接跳过)
-                    out.append(_ocr_scan_page(doc[i], ctx, deferred))
-                    continue
-                segs.sort(key=lambda s: s[0])
-                page_md = "\n\n".join(s[2] for s in segs if s[2])
-                if not page_md.strip():
-                    page_md = _ocr_scan_page(doc[i], ctx, deferred)
-                # 文字页含内嵌图(非整页扫描): 图内文字未提取, 留标记给 stage2
-                # (不强行 OCR 避免 logo/底图加噪; 纯扫描页已由 _ocr_scan_page 处理)
-                try:
-                    n_imgs = len(doc[i].get_images(full=False))
-                except Exception:
-                    n_imgs = 0
-                if n_imgs and page_md.strip():
-                    page_md += "\n\n" + defer(deferred, "inline-image", n_imgs,
-                                              "图内文字未提取, 见原文件")
-                out.append(page_md)
-            body = "\n\n".join(x for x in out if x)
-        finally:
-            if pp is not None:
-                pp.close()
+        n = doc.page_count
+        out = []
+        for i in range(n):
+            segs = []
+            for lvl, t in page_entries.get(i + 1, []):
+                lvl = max(1, min(6, lvl))
+                segs.append((0.0, "head", "#" * lvl + " " + t))
+            segs.extend(_page_segments(doc[i]))
+            if not segs:
+                # 无文字/表格/大纲 -> 扫描页, 渲染+OCR (不直接跳过)
+                out.append(_ocr_scan_page(doc[i], ctx, deferred))
+                continue
+            segs.sort(key=lambda s: s[0])
+            page_md = "\n\n".join(s[2] for s in segs if s[2])
+            if not page_md.strip():
+                page_md = _ocr_scan_page(doc[i], ctx, deferred)
+            # 文字页含内嵌图(非整页扫描): 图内文字未提取, 留标记给 stage2
+            # (不强行 OCR 避免 logo/底图加噪; 纯扫描页已由 _ocr_scan_page 处理)
+            try:
+                n_imgs = len(doc[i].get_images(full=False))
+            except Exception:
+                n_imgs = 0
+            if n_imgs and page_md.strip():
+                page_md += "\n\n" + defer(deferred, "inline-image", n_imgs,
+                                          "图内文字未提取, 见原文件")
+            out.append(page_md)
+        body = "\n\n".join(x for x in out if x)
     finally:
         if doc:
             doc.close()
@@ -90,25 +79,24 @@ def parse(path, ctx=None):
     return {"title": title, "body": body, "tags": [], "meta": {}, "deferred": deferred}
 
 
-def _page_segments(fpage, ppage, ctx):
+def _page_segments(fpage):
     """返回 [(y, type, md), ...] 该页的表格/文字/标题段."""
     segs = []
-    # 表格 (pdfplumber)
+    # 表格 (fitz find_tables; 抛异常则该页无表格)
     tables = []
-    if ppage is not None:
-        try:
-            for tb in ppage.find_tables():
-                ext = tb.extract()
-                if not ext:
-                    continue
-                rows = [[("" if c is None else str(c)) for c in r] for r in ext]
-                nrows = len(rows)
-                ncols = max((len(r) for r in rows), default=0)
-                if nrows < 2 or ncols < 2:
-                    continue  # 过滤伪表 (页眉/单列等)
-                tables.append((tb.bbox, rows, ncols))
-        except Exception:
-            pass
+    try:
+        for tb in fpage.find_tables().tables:
+            ext = tb.extract()
+            if not ext:
+                continue
+            rows = [[("" if c is None else str(c)) for c in r] for r in ext]
+            nrows = len(rows)
+            ncols = max((len(r) for r in rows), default=0)
+            if nrows < 2 or ncols < 2:
+                continue  # 过滤伪表 (页眉/单列等)
+            tables.append((tb.bbox, rows, ncols))
+    except Exception:
+        pass
 
     table_bboxes = [t[0] for t in tables]
 
@@ -132,6 +120,7 @@ def _page_segments(fpage, ppage, ctx):
 
 
 def _in_any_table(bbox, table_bboxes, tol=2):
+    """检查 bbox 是否落在任一表格区域内."""
     bx0, by0, bx1, by1 = bbox
     for tx0, ty0, tx1, ty1 in table_bboxes:
         if (bx0 + tol >= tx0 and bx1 - tol <= tx1
