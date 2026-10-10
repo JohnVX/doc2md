@@ -9,6 +9,10 @@ dist/
 # 输出目录
 knowledge/
 
+# 示例资料 (保留目录结构, 不传实际文档)
+input-examples/*/
+input-examples/*.zip
+
 # 虚拟环境
 .venv/
 venv/
