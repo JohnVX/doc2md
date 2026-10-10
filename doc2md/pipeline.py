@@ -38,10 +38,10 @@ _OCR_RE = re.compile(r'<!-- ocr:(img|scan):(\S+) -->')
 def _detect_resources():
     """自动嗅探 CPU 核数和可用内存, 返回 (max_workers, max_ocr_threads, cpus, avail_mb).
 
-    无需人工配置: 根据硬件自动调节, 最多吃 ~80% 资源, 留余量给系统/其他程序.
-    - MAX_WORKERS (ProcessPool 解析): 每进程 ~500MB, 受 CPU 和内存约束, 上限 8
-    - MAX_OCR_THREADS (ThreadPool OCR): OMP_NUM_THREADS=1 时每线程 1 核,
-      取 cpu*0.8 (向下取整), 不加人工 cap
+    无需人工配置: 根据硬件自动调节, 最多吃 ~60% 资源, 留余量给系统/其他程序.
+    总 CPU 预算 = int(cpus * 0.6), OCR 拿 3/4 (瓶颈), worker 拿 1/4 (解析够用).
+    - MAX_OCR_THREADS (ThreadPool OCR): OMP_NUM_THREADS=1 时每线程 1 核
+    - MAX_WORKERS (ProcessPool 解析): 每进程 ~500MB, 上限 8
     """
     cpus = os.cpu_count() or 2
 
@@ -81,9 +81,10 @@ def _detect_resources():
             except Exception:
                 pass
 
-    ocr_budget = max(0, int(avail_mb * 0.8) - 1024)
-    max_ocr = min(max(1, int(cpus * 0.8)), max(1, ocr_budget // 200))
-    max_workers = min(cpus * 2, max(1, avail_mb // 500), 8, max(1, int(cpus * 0.8) - max_ocr))
+    cpu_budget = max(2, int(cpus * 0.6))
+    ocr_budget_mb = max(0, int(avail_mb * 0.6) - 1024)
+    max_ocr = min(max(1, cpu_budget * 3 // 4), max(1, ocr_budget_mb // 200))
+    max_workers = min(cpus * 2, max(1, avail_mb // 500), 8, max(1, cpu_budget - max_ocr))
     return max_workers, max_ocr, cpus, avail_mb
 
 
