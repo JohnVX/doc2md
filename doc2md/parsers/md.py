@@ -1,7 +1,7 @@
 """Markdown 解析: 通用 pass-through + 标题取首 H1.
 
 跟进内嵌本地图片引用 (![](相对路径)): 若解析得到本地文件, 则登记到 meta.side_files
-供 pipeline 拷到 assets; 插入 OCR 占位 (OCR 在 pipeline 收尾阶段 parent 进程执行).
+供 pipeline 拷到 assets; 插入 OCR 占位 (OCR 在 pipeline 流式收尾 parent 进程执行).
 """
 import os
 import re

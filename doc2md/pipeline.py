@@ -1,21 +1,23 @@
-"""主流程: 扫描输入 -> 识别 -> [并行解析] -> [ThreadPool OCR] -> 去噪 -> 分类 -> 落 md + 拷原文件 -> 目录 -> 增量.
+"""主流程: 扫描输入 -> 识别 -> [流式解析+OCR+写出] -> 清理+索引.
 
-三阶段: serial 预处理(检测/sha/跳过/重分类) -> ProcessPool 并行解析(进程隔离) -> serial 收尾(ThreadPool OCR+去噪+分类+写).
+三阶段: serial 预处理(检测/sha/跳过/重分类) -> 流式解析+收尾 -> 清理+索引.
 解析用 ProcessPool 而非 ThreadPool: fitz.Page.find_tables() 在 C 层有全局状态, 线程不安全.
 OCR 用 ThreadPool 而非 ProcessPool: ONNX Runtime run() 线程安全, 共享单实例引擎零额外内存.
-OCR 在收尾阶段(parent 进程)执行: parser 只存图+插占位 <!-- ocr:type:dest -->,
-_post_ocr 替换占位为 OCR 文本或 defer 标记. 避免多 worker 各加载 OCR 引擎(~400MB/进程)致 OOM.
+流式处理: 解析完一个文件立即 OCR+写出+gc.collect(), 释放内存后再处理下一个.
+  避免所有解析结果常驻内存导致低内存机器 OOM (1GB 可用时 18 文件 178 图可跑完).
+parser 只存图+插占位 <!-- ocr:type:dest -->, _post_ocr 替换占位为 OCR 文本或 defer 标记.
 并行度自动嗅探 (CPU 核数 + 可用内存), 无需人工配置.
 parser 返回的 deferred (结构化 stage2 待处理项) 经 aggregate_deferred 合并后
 写入 front-matter / manifest / catalog, 供 stage2 agent 编程查询.
 """
+import gc
 import logging
 import os
 import re
 import shutil
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 import yaml
@@ -86,7 +88,7 @@ def _detect_resources():
 
 
 def _post_ocr(body, out, doc_id, deferred_list):
-    """收尾阶段 OCR: 替换 <!-- ocr:type:dest --> 占位为 OCR 文本或 defer 标记.
+    """流式收尾 OCR: 替换 <!-- ocr:type:dest --> 占位为 OCR 文本或 defer 标记.
 
     parser 在 worker 进程中只存图+插占位, 不加载 OCR 引擎 (避免多进程内存爆炸).
     本函数在 parent 进程执行, ThreadPool 并行 OCR (ONNX Runtime 线程安全,
@@ -415,76 +417,66 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
         log.info("扫描完成: %d 待解析, %d 跳过, %d 不支持 (共 %d 文件)",
                  len(parse_items), skipped, len(finalize_items), len(files))
 
-    # === 阶段 2: 并行解析 (ProcessPool; 进程隔离: fitz find_tables 线程不安全, 必须进程级隔离) ===
-    parse_results = {}  # rel -> (parsed, is_error, parse_time)
+    # === 阶段 2+3: 流式解析+收尾 (解析完立即 OCR+写出+释放; 低内存机器不 OOM) ===
     if not interrupted and parse_items:
         max_workers = min(MAX_WORKERS, len(parse_items))
         log.info("解析 %d 个文件 (%d 进程)...", len(parse_items), max_workers)
         pool = ProcessPoolExecutor(max_workers=max_workers)
         future_map = {}
-        item_by_rel = {}
         for item in parse_items:
             p, info, rel, sha, doc_id, ctx, handler = item
             future_map[rel] = pool.submit(_parse_worker, handler, str(p), ctx)
-            item_by_rel[rel] = item
+        ocr_announced = False
         try:
-            for future in as_completed(future_map.values()):
-                rel = next(r for r, f in future_map.items() if f is future)
-                p = item_by_rel[rel][0]
-                if interrupted and not future.done():
-                    future.cancel()
-                    continue
+            for item in parse_items:
+                p, info, rel, sha, doc_id, ctx, handler = item
+                if interrupted:
+                    break
                 try:
-                    parsed, parse_time = future.result()
-                    parse_results[rel] = (parsed, False, parse_time)
+                    parsed, parse_time = future_map[rel].result()
                     log.info("解析完成: %s (%.1fs)", rel, parse_time)
                 except KeyboardInterrupt:
                     interrupted = True
+                    break
                 except Exception as ex:
                     parsed = _parse_failure(p, rel, ex)
                     errors += 1
-                    parse_results[rel] = (parsed, True, 0.0)
+                    parse_time = 0.0
                     log.info("解析失败: %s", rel)
+                    deferred += 1
+                n_ocr = len(_OCR_RE.findall(parsed.get("body", "")))
+                if n_ocr > 0 and not ocr_announced:
+                    log.info("OCR: %d 线程...", MAX_OCR_THREADS)
+                    ocr_announced = True
+                status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
+                if status == "write_fail":
+                    errors += 1
+                else:
+                    processed += 1
+                del parsed
+                gc.collect()
         except KeyboardInterrupt:
             interrupted = True
         finally:
             for f in future_map.values():
                 f.cancel()
-            # wait=True: 确保 worker 进程退出后再进 Phase 3, 释放内存给 OCR 用
             pool.shutdown(wait=True, cancel_futures=True)
         if interrupted:
-            log.warning("收到中断信号 (解析阶段), 保存已处理部分并退出...")
+            log.warning("收到中断信号 (解析/收尾阶段), 保存已处理部分并退出...")
 
-    # === 阶段 3: 串行收尾 (OCR + 去噪 + 分类 + 写 md; 按原排序, 确定性输出) ===
-    n_ocr = sum(len(_OCR_RE.findall(pr[0]["body"]))
-                for pr in parse_results.values() if not pr[1])
-    if n_ocr:
-        log.info("OCR: %d 张图片 (%d 线程)...", n_ocr, MAX_OCR_THREADS)
-    try:
-        for item in parse_items:
-            p, info, rel, sha, doc_id, ctx, handler = item
-            if rel not in parse_results:
-                continue
-            parsed, is_error, parse_time = parse_results[rel]
-            if is_error:
-                deferred += 1
-                log.info("defer(stage2): %s (parse-failed)", rel)
-            status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
-            if status == "write_fail":
-                errors += 1
-            else:
-                processed += 1
-
-        for item in finalize_items:
-            p, info, rel, sha, doc_id, parsed, is_error = item
-            status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed)
-            if status == "write_fail":
-                errors += 1
-            else:
-                processed += 1
-    except KeyboardInterrupt:
-        interrupted = True
-        log.warning("收到中断信号 (收尾阶段), 保存已处理部分并退出...")
+    # finalize_items: 无需解析, 直接收尾
+    if not interrupted:
+        try:
+            for item in finalize_items:
+                p, info, rel, sha, doc_id, parsed, _is_err = item
+                status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed)
+                if status == "write_fail":
+                    errors += 1
+                else:
+                    processed += 1
+        except KeyboardInterrupt:
+            interrupted = True
+            log.warning("收到中断信号 (收尾阶段), 保存已处理部分并退出...")
 
     # === 阶段 4: 清理 + 保存 + 生成索引 ===
     if not move:

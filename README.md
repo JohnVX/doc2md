@@ -33,14 +33,14 @@
 ```
 
 1. **识别**：按文件**内容签名**判定格式，不靠扩展名（扩展名改错也能认对）。OOXML（docx/pptx/xlsx）都是 zip，靠 zip 内部结构区分；PDF/图片看魔数；文本类嗅探编码后按内容特征分 md/code/txt；旧二进制 office（.doc/.xls/.ppt）识别为 ole2。
-2. **解析**（ProcessPool 并行）：每种格式走对应解析器（见下表），产出 Markdown 正文。解析器只提取文字/表格/图片，不做 OCR——图片存盘后插入 `<!-- ocr:type:dest -->` 占位，OCR 留到收尾阶段执行。解析器不加载 OCR 引擎，worker 进程轻量（避免多进程内存爆炸）。
-3. **OCR**（ThreadPool 并行）：收尾阶段在 parent 进程执行，单实例 OCR 引擎，多线程并行处理图片（ONNX Runtime 线程安全）。WMF/EMF 格式自动跳过（Linux 无解码器），defer 给 stage2。
+2. **解析 + OCR + 落盘**（流式处理）：ProcessPool 并行解析，每个文件解析完立即在 parent 进程执行 OCR（ThreadPool）+ 去噪 + 分类 + 写 md，然后 `gc.collect()` 释放内存再处理下一个。解析器只提取文字/表格/图片，不做 OCR——图片存盘后插入 `<!-- ocr:type:dest -->` 占位，OCR 留到收尾时替换。解析器不加载 OCR 引擎，worker 进程轻量（避免多进程内存爆炸）。
+3. **OCR**（ThreadPool 并行）：单实例 OCR 引擎，多线程并行处理图片（ONNX Runtime 线程安全）。WMF/EMF 格式自动跳过（Linux 无解码器），defer 给 stage2。
 4. **去噪与分类**：折叠空行、去明显页码行、去行尾空白；分类由配置驱动；摘要取首个正文段（跳过标题/图片/表格/列表）。
 5. **落盘**：写 front-matter + 正文 md 到 `docs/<类目>/`；原件复制（或 `--move` 移动）到 `original-doc/`；提取的内嵌图存 `original-doc/<doc-id>_assets/`。
 6. **入目录**：更新 `catalog.yaml` + `handoff.yaml`（每次从全量 manifest 重建）。
 7. **增量清理**：哈希未变则跳过；源文件删除则清理其 md/原件/条目；格式变为不支持则转 defer（见下）。
 
-**为什么解析用 ProcessPool、OCR 用 ThreadPool？** 解析阶段 fitz（PDF 表格检测）在 C 层有全局状态，线程不安全，必须进程隔离。OCR 阶段 rapidocr 底层 ONNX Runtime 的 `run()` 线程安全，用线程即可——共享同一个模型实例，零额外内存。两阶段的并行度均按硬件自动嗅探，无需人工配置。
+**为什么解析用 ProcessPool、OCR 用 ThreadPool？** 解析阶段 fitz（PDF 表格检测）在 C 层有全局状态，线程不安全，必须进程隔离。OCR 阶段 rapidocr 底层 ONNX Runtime 的 `run()` 线程安全，用线程即可——共享同一个模型实例，零额外内存。流式处理：每个文件解析完立即 OCR+写出+`gc.collect()`，避免所有解析结果常驻内存导致 OOM。并行度按硬件自动嗅探，无需人工配置。
 
 ### 各格式能力
 
@@ -318,7 +318,7 @@ ai-doc2md/
 │   ├── config.py          # 配置加载 + 通用分类
 │   ├── manifest.py        # 增量 manifest
 │   ├── catalog.py         # catalog.yaml + handoff.yaml 生成
-│   ├── pipeline.py        # 主流程编排 (三阶段: 串行预处理→ProcessPool并行解析→串行收尾[ThreadPool OCR+去噪+分类])
+│   ├── pipeline.py        # 主流程编排 (流式: 串行预处理→ProcessPool解析+OCR+写出→清理索引)
 │   ├── cli.py             # CLI + 跨平台适配
 │   ├── util.py            # 工具函数
 │   └── parsers/           # 各格式解析器（md/text/image/xlsx/docx/pptx/pdf）
