@@ -4,7 +4,7 @@
   - 递归 walk 进 GROUP, 不丢分组内内容
   - 标题: slide.shapes.title -> 否则首个非空文本框
   - 文本框/表格/图片/备注; 跳过母版占位符样板文本
-  - 图片 blob -> 存 assets -> OCR 占位(流式收尾执行)
+  - 图片 blob -> 存 assets -> OCR 占位(收尾执行)
 """
 from pathlib import Path
 
@@ -148,7 +148,7 @@ def _render_table(tbl):
 
 
 def _handle_picture(sh, no, ctx, items, deferred):
-    """处理图片形状: 提取 blob 存 assets, 插入 OCR 占位(OCR 在 pipeline 流式收尾执行).
+    """处理图片形状: 提取 blob 存 assets, 插入 OCR 占位(OCR 在 pipeline 收尾执行).
 
     worker 进程不再加载 OCR 引擎, 避免多进程内存爆炸 (每进程 ~400MB).
     """

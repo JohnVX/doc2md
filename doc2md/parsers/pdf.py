@@ -5,7 +5,7 @@
   - 大纲: get_toc() 在对应页注入 # 级标题, 结构化 md
   - 表格: fitz find_tables(), 过滤伪表(列<2/行<2); 该表区文字从 blocks 剔除避免重复
   - find_tables() 抛异常时该页退化为仅文字层, 不整解析失败
-  - 扫描页(无文字/表格/大纲): 渲染页为图 -> 存 assets -> OCR 占位(流式收尾执行)
+  - 扫描页(无文字/表格/大纲): 渲染页为图 -> 存 assets -> OCR 占位(收尾执行)
   - 文字页含内嵌图: 留 stage2 标记(图内文字未提取)
 
 不使用 pymupdf_layout (PyMuPDF 推广的增强布局分析包):
@@ -139,7 +139,7 @@ def _in_any_table(bbox, table_bboxes, tol=2):
 
 
 def _ocr_scan_page(fpage, ctx, deferred, dpi=150):
-    """扫描页: 渲染为 png 存 assets. OCR 在 pipeline 流式收尾执行."""
+    """扫描页: 渲染为 png 存 assets. OCR 在 pipeline 收尾执行."""
     try:
         pix = fpage.get_pixmap(dpi=dpi)
         png = pix.tobytes("png")

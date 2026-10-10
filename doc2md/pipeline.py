@@ -1,12 +1,13 @@
-"""主流程: 扫描输入 -> 识别 -> [流式解析+OCR+写出] -> 清理+索引.
+"""主流程: 扫描输入 -> 识别 -> [解析+OCR+写出] -> 清理+索引.
 
-三阶段: serial 预处理(检测/sha/跳过/重分类) -> 流式解析+收尾 -> 清理+索引.
+三阶段: serial 预处理(检测/sha/跳过/重分类) -> 解析+收尾 -> 清理+索引.
+两种模式 (按可用内存自动选择, 无需人工配置):
+  - batch (≥4GB): 全部解析 -> shutdown pool -> OCR+写出. worker 与 OCR 不重叠, CPU 不叠加.
+  - streaming (<4GB): 解析一个 -> 立即 OCR+写出+gc.collect(). 低内存安全.
 解析用 ProcessPool 而非 ThreadPool: fitz.Page.find_tables() 在 C 层有全局状态, 线程不安全.
 OCR 用 ThreadPool 而非 ProcessPool: ONNX Runtime run() 线程安全, 共享单实例引擎零额外内存.
-流式处理: 解析完一个文件立即 OCR+写出+gc.collect(), 释放内存后再处理下一个.
-  避免所有解析结果常驻内存导致低内存机器 OOM (1GB 可用时 18 文件 178 图可跑完).
+资源上限 ~60%: CPU 预算 = int(cpus*0.6), OCR 拿 3/4 (batch) 或满额 (streaming), worker 拿 1/4.
 parser 只存图+插占位 <!-- ocr:type:dest -->, _post_ocr 替换占位为 OCR 文本或 defer 标记.
-并行度自动嗅探 (CPU 核数 + 可用内存), 无需人工配置.
 parser 返回的 deferred (结构化 stage2 待处理项) 经 aggregate_deferred 合并后
 写入 front-matter / manifest / catalog, 供 stage2 agent 编程查询.
 """
@@ -31,17 +32,20 @@ log = logging.getLogger("pipeline")
 LARGE_FILE_MB = 50  # 超过此值给出慢速警告
 MAX_WORKERS = None   # None=自动嗅探; 测试可设为 1 强制串行
 MAX_OCR_THREADS = None  # None=自动嗅探
+BATCH_MODE = None  # None=自动嗅探; True/False 可测试强制
 
 _OCR_RE = re.compile(r'<!-- ocr:(img|scan):(\S+) -->')
 
 
 def _detect_resources():
-    """自动嗅探 CPU 核数和可用内存, 返回 (max_workers, max_ocr_threads, cpus, avail_mb).
+    """自动嗅探 CPU 核数和可用内存, 返回 (max_workers, max_ocr_threads, cpus, avail_mb, batch_mode).
 
     无需人工配置: 根据硬件自动调节, 最多吃 ~60% 资源, 留余量给系统/其他程序.
-    总 CPU 预算 = int(cpus * 0.6), OCR 拿 3/4 (瓶颈), worker 拿 1/4 (解析够用).
-    - MAX_OCR_THREADS (ThreadPool OCR): OMP_NUM_THREADS=1 时每线程 1 核
-    - MAX_WORKERS (ProcessPool 解析): 每进程 ~500MB, 上限 8
+    两种模式:
+    - batch (≥4GB): 全部解析 → shutdown pool → OCR. worker 与 OCR 不重叠, CPU 不叠加.
+      3/4 预算给 OCR, 1/4 给 worker (多 worker 并行解析).
+    - streaming (<4GB): 解析一个 → 立即 OCR+写出+gc. 低内存安全.
+      OCR 拿满预算, worker=1 (避免与 OCR 叠加).
     """
     cpus = os.cpu_count() or 2
 
@@ -83,13 +87,18 @@ def _detect_resources():
 
     cpu_budget = max(2, int(cpus * 0.6))
     ocr_budget_mb = max(0, int(avail_mb * 0.6) - 1024)
-    max_ocr = min(max(1, cpu_budget * 3 // 4), max(1, ocr_budget_mb // 200))
-    max_workers = min(cpus * 2, max(1, avail_mb // 500), 8, max(1, cpu_budget - max_ocr))
-    return max_workers, max_ocr, cpus, avail_mb
+    batch_mode = avail_mb >= 4096
+    if batch_mode:
+        max_ocr = min(max(1, cpu_budget * 3 // 4), max(1, ocr_budget_mb // 200))
+        max_workers = min(cpus * 2, max(1, avail_mb // 500), 8, max(1, cpu_budget - max_ocr))
+    else:
+        max_ocr = min(max(1, cpu_budget), max(1, ocr_budget_mb // 200))
+        max_workers = 1
+    return max_workers, max_ocr, cpus, avail_mb, batch_mode
 
 
 def _post_ocr(body, out, doc_id, deferred_list):
-    """流式收尾 OCR: 替换 <!-- ocr:type:dest --> 占位为 OCR 文本或 defer 标记.
+    """收尾 OCR: 替换 <!-- ocr:type:dest --> 占位为 OCR 文本或 defer 标记.
 
     parser 在 worker 进程中只存图+插占位, 不加载 OCR 引擎 (避免多进程内存爆炸).
     本函数在 parent 进程执行, ThreadPool 并行 OCR (ONNX Runtime 线程安全,
@@ -323,15 +332,19 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
         logging.getLogger(noisy).setLevel(logging.ERROR)
 
     # --- 资源嗅探: 自动调节并行度 (无人工配置) ---
-    global MAX_WORKERS, MAX_OCR_THREADS
-    if MAX_WORKERS is None or MAX_OCR_THREADS is None:
-        dw, dt, cpus, avail_mb = _detect_resources()
+    global MAX_WORKERS, MAX_OCR_THREADS, BATCH_MODE
+    if MAX_WORKERS is None or MAX_OCR_THREADS is None or BATCH_MODE is None:
+        dw, dt, cpus, avail_mb, batch_mode = _detect_resources()
         if MAX_WORKERS is None:
             MAX_WORKERS = dw
         if MAX_OCR_THREADS is None:
             MAX_OCR_THREADS = dt
-        log.info("硬件: %d 核 / %.1fGB 可用 -> 解析 %d 进程, OCR %d 线程",
-                 cpus, avail_mb / 1024, MAX_WORKERS, MAX_OCR_THREADS)
+        if BATCH_MODE is None:
+            BATCH_MODE = batch_mode
+        log.info("硬件: %d 核 / %.1fGB 可用 -> 解析 %d 进程, OCR %d 线程 (%s)",
+                 cpus, avail_mb / 1024, MAX_WORKERS, MAX_OCR_THREADS,
+                 "批量" if BATCH_MODE else "流式")
+    batch_mode = BATCH_MODE
 
     # --- 路径校验 ---
     in_dir = Path(input_dir).resolve()
@@ -419,16 +432,21 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
         log.info("扫描完成: %d 待解析, %d 跳过, %d 不支持 (共 %d 文件)",
                  len(parse_items), skipped, len(finalize_items), len(files))
 
-    # === 阶段 2+3: 流式解析+收尾 (解析完立即 OCR+写出+释放; 低内存机器不 OOM) ===
+    # === 阶段 2+3: 解析+收尾 ===
+    # batch (≥4GB): 全部解析 → shutdown pool → OCR. worker 与 OCR 不重叠, CPU 不叠加.
+    # streaming (<4GB): 解析一个 → 立即 OCR+写出+gc. 低内存安全, 1 worker 不叠加.
     if not interrupted and parse_items:
         max_workers = min(MAX_WORKERS, len(parse_items))
-        log.info("解析 %d 个文件 (%d 进程)...", len(parse_items), max_workers)
+        log.info("解析 %d 个文件 (%d 进程, %s)...", len(parse_items), max_workers,
+                 "批量" if batch_mode else "流式")
         pool = ProcessPoolExecutor(max_workers=max_workers)
         future_map = {}
         for item in parse_items:
             p, info, rel, sha, doc_id, ctx, handler = item
             future_map[rel] = pool.submit(_parse_worker, handler, str(p), ctx)
         ocr_announced = False
+        parse_results = {}  # batch 模式: 暂存解析结果
+
         try:
             for item in parse_items:
                 p, info, rel, sha, doc_id, ctx, handler = item
@@ -446,23 +464,52 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
                     parse_time = 0.0
                     log.info("解析失败: %s", rel)
                     deferred += 1
-                n_ocr = len(_OCR_RE.findall(parsed.get("body", "")))
-                if n_ocr > 0 and not ocr_announced:
-                    log.info("OCR: %d 线程...", MAX_OCR_THREADS)
-                    ocr_announced = True
-                status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
-                if status == "write_fail":
-                    errors += 1
+
+                if batch_mode:
+                    parse_results[rel] = (parsed, parse_time)
                 else:
-                    processed += 1
-                del parsed
-                gc.collect()
+                    n_ocr = len(_OCR_RE.findall(parsed.get("body", "")))
+                    if n_ocr > 0 and not ocr_announced:
+                        log.info("OCR: %d 线程...", MAX_OCR_THREADS)
+                        ocr_announced = True
+                    status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
+                    if status == "write_fail":
+                        errors += 1
+                    else:
+                        processed += 1
+                    del parsed
+                    gc.collect()
         except KeyboardInterrupt:
             interrupted = True
         finally:
             for f in future_map.values():
                 f.cancel()
             pool.shutdown(wait=True, cancel_futures=True)
+
+        # batch 模式: pool 已 shutdown (worker 进程已退出), OCR 不与解析叠加
+        # 即使中断, 仍写出已解析完的文件 (parse_results 只含成功的)
+        if batch_mode:
+            try:
+                for item in parse_items:
+                    p, info, rel, sha, doc_id, ctx, handler = item
+                    if rel not in parse_results:
+                        continue
+                    parsed, parse_time = parse_results.pop(rel)
+                    n_ocr = len(_OCR_RE.findall(parsed.get("body", "")))
+                    if n_ocr > 0 and not ocr_announced:
+                        log.info("OCR: %d 线程...", MAX_OCR_THREADS)
+                        ocr_announced = True
+                    status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
+                    if status == "write_fail":
+                        errors += 1
+                    else:
+                        processed += 1
+                    del parsed
+                    gc.collect()
+            except KeyboardInterrupt:
+                interrupted = True
+                log.warning("收到中断信号 (收尾阶段), 保存已处理部分并退出...")
+
         if interrupted:
             log.warning("收到中断信号 (解析/收尾阶段), 保存已处理部分并退出...")
 
