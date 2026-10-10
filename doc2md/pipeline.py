@@ -316,6 +316,7 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
     """
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+    _t_start = time.time()
     # 压掉 pdfminer/PIL 的内部噪声 (FontBBox 等), 只留 ERROR
     for noisy in ("pdfminer", "pdfminer.six", "PIL"):
         logging.getLogger(noisy).setLevel(logging.ERROR)
@@ -496,6 +497,7 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
         catalog.build_handoff(man.values(), out)
     except Exception as ex:
         log.error("catalog/handoff 生成失败: %s", ex)
-    log.info("完成: 处理 %d, 跳过 %d, 失败 %d, 清理 %d, 不支持 %d, defer %d",
-             processed, skipped, errors, purged, unsupported, deferred)
+    log.info("完成: 处理 %d, 跳过 %d, 失败 %d, 清理 %d, 不支持 %d, defer %d (%.1fs)",
+             processed, skipped, errors, purged, unsupported, deferred,
+             time.time() - _t_start)
     return processed, skipped, errors
