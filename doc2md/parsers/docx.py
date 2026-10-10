@@ -1,16 +1,16 @@
-"""Word(docx)解析: python-docx, 保序输出段落/表格 + 内嵌图 OCR + 文本框 + 公式/图表标记.
+"""Word(docx)解析: python-docx, 保序输出段落/表格 + 内嵌图提取+OCR占位 + 文本框 + 公式/图表标记.
 
 通用, 不针对具体文档:
   - body 元素按序遍历 (w:p / w:tbl), 段落按样式映射为 md 标题/有序列表(编号+层级)/正文(含粗斜体)
-  - 表格 -> md 表格; 表格单元格内的图片也提取+OCR
-  - 段落内嵌图(含纯图段落) -> 提取 blob -> 存 assets -> OCR
+  - 表格 -> md 表格; 表格单元格内的图片也提取
+  - 段落内嵌图(含纯图段落) -> 提取 blob -> 存 assets -> OCR 占位(收尾阶段执行)
   - 浮动文本框 (w:txbxContent) -> 扫描 XML 提取文字附在末尾
   - 公式(OMML)/图表/SmartArt -> 检测到即标记 stage2(文本框不计, 其文字已提取)
 """
 import re
 from pathlib import Path
 
-from .. import ocr, util
+from .. import util
 from ._common import defer, is_placeholder, md_table
 
 
@@ -44,11 +44,7 @@ def parse(path, ctx=None):
             # 表格单元格内的图片(表格 md 放不下图, 单独附后提取+OCR, 不静默丢失)
             for i, (blob, ext) in enumerate(_element_images(child, d), 1):
                 dest, ref = util.save_asset(blob, ctx, ext)
-                txt = ocr.ocr_image(blob, ctx)
-                if txt:
-                    out.append(f"![表格图{i}]({ref})\n\n```\n{txt}\n```")
-                else:
-                    out.append(f"![表格图{i}]({ref})\n\n" + defer(deferred, "image-ocr", 1))
+                out.append(f"![表格图{i}]({ref})\n\n<!-- ocr:img:{dest} -->")
 
     # 浮动文本框防御 (body 之外的 drawing 里的文本)
     txbx = _extract_textboxes(d)
@@ -93,11 +89,7 @@ def _render_paragraph(p, d, ctx, deferred):
         chunks = [text] if text.strip() else []
         for i, (blob, ext) in enumerate(imgs, 1):
             dest, ref = util.save_asset(blob, ctx, ext)
-            txt = ocr.ocr_image(blob, ctx)
-            if txt:
-                chunks.append(f"![图{i}]({ref})\n\n```\n{txt}\n```")
-            else:
-                chunks.append(f"![图{i}]({ref})\n\n" + defer(deferred, "image-ocr", 1))
+            chunks.append(f"![图{i}]({ref})\n\n<!-- ocr:img:{dest} -->")
         return "\n\n".join(chunks)
     # 空段
     if not text.strip():

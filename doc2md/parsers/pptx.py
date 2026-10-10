@@ -1,14 +1,14 @@
-"""PowerPoint(pptx)解析: python-pptx, 递归分组图形 + 内嵌图 OCR.
+"""PowerPoint(pptx)解析: python-pptx, 递归分组图形 + 内嵌图提取+OCR占位.
 
 通用:
   - 递归 walk 进 GROUP, 不丢分组内内容
   - 标题: slide.shapes.title -> 否则首个非空文本框
   - 文本框/表格/图片/备注; 跳过母版占位符样板文本
-  - 图片 blob -> 存 assets -> OCR 文本附在引用后
+  - 图片 blob -> 存 assets -> OCR 占位(收尾阶段执行)
 """
 from pathlib import Path
 
-from .. import ocr, util
+from .. import util
 from ._common import defer, is_placeholder, md_table
 
 
@@ -148,15 +148,14 @@ def _render_table(tbl):
 
 
 def _handle_picture(sh, no, ctx, items, deferred):
-    """处理图片形状: 提取+OCR+defer."""
+    """处理图片形状: 提取 blob 存 assets, 插入 OCR 占位(OCR 在 pipeline 收尾阶段执行).
+
+    worker 进程不再加载 OCR 引擎, 避免多进程内存爆炸 (每进程 ~400MB).
+    """
     try:
         blob = sh.image.blob
         ext = (sh.image.ext or "png").lstrip(".")
     except Exception:
         return
     dest, ref = util.save_asset(blob, ctx, ext)
-    txt = ocr.ocr_image(blob, ctx)
-    if txt:
-        items.append(f"![图{no}]({ref})\n\n```\n{txt}\n```")
-    else:
-        items.append(f"![图{no}]({ref})\n\n" + defer(deferred, "image-ocr", 1))
+    items.append(f"![图{no}]({ref})\n\n<!-- ocr:img:{dest} -->")

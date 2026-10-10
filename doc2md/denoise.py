@@ -84,8 +84,8 @@ def extract_summary(text, maxlen=200):
                 return r
             para = []
             continue
-        # 标题/图片/注释/引用 行作为段落分隔, 终结当前 para 但自身不入摘要
-        if s.startswith(("#", "![", "<!--", ">")):
+        # 标题/图片/注释/引用/表格行 作为段落分隔, 终结当前 para 但自身不入摘要
+        if s.startswith(("#", "![", "<!--", ">", "|")):
             r = emit(para)
             if r:
                 return r

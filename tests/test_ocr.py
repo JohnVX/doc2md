@@ -61,3 +61,17 @@ def test_ocr_positive_produces_text():
 
 
 CASES.append(("ocr_positive_produces_text", test_ocr_positive_produces_text))
+
+
+def test_is_ocr_supported_wmf_emf():
+    """WMF/EMF 格式不支持 OCR, PNG 支持."""
+    assert_true(not ocr.is_ocr_supported(b'\xd7\xcd\xc6\x9a' + b'\x00' * 100), "WMF 不支持")
+    emf = b'\x01\x00\x00\x00' + b'\x00' * 36 + b' EMF' + b'\x00' * 100
+    assert_true(not ocr.is_ocr_supported(emf), "EMF 不支持")
+    png = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
+    assert_true(ocr.is_ocr_supported(png), "PNG 支持")
+    assert_true(not ocr.is_ocr_supported(b''), "空 blob 不支持")
+    assert_true(not ocr.is_ocr_supported(None), "None 不支持")
+
+
+CASES.append(("is_ocr_supported_wmf_emf", test_is_ocr_supported_wmf_emf))

@@ -16,7 +16,7 @@
 - **统一索引**：全局 `catalog.yaml` 列出每份资料的 id / 标题 / 类目 / 来源 / 摘要，agent 据此定位再读正文；章节结构在 md 正文里（标题锚点 + 长 md 顶部渲染目录）。
 - **去噪 + 提取**：每种格式用对应工具解析，去样板噪声，提取正文、表格、图片中的文字（OCR）。
 - **确定性与可复现**：同一输入产出同一结果；doc-id 由源文件相对路径哈希生成，跨平台稳定不漂移。
-- **并行加速**：多文件解析自动并行（ProcessPool，上限 4），输出顺序按文件名排序不受进程影响，确定性不变。
+- **并行加速**：多文件解析自动并行（ProcessPool），OCR 多图并行（ThreadPool），并行度按硬件自动嗅探（CPU 核数 + 可用内存），输出顺序按文件名排序不受进程影响，确定性不变。
 - **不预设领域**：类目体系完全由配置定义，换一份 `config.yaml` 即可从「安全审计」切到「法规」「产品手册」等任何领域，代码不动。
 - **不依赖大模型**：分类、摘要、标题选取全用规则与抽取式，OCR 用本地引擎。
 
@@ -29,32 +29,34 @@
 输入一个目录，递归扫描每个文件，走统一流水线：
 
 ```
-扫描 → 识别 → 解析 → 去噪与提取 → 分类 → 落盘(md+原件) → 入目录 → 增量清理
+扫描 → 识别 → [并行解析] → [并行OCR] → 去噪与分类 → 落盘(md+原件) → 入目录 → 增量清理
 ```
 
 1. **识别**：按文件**内容签名**判定格式，不靠扩展名（扩展名改错也能认对）。OOXML（docx/pptx/xlsx）都是 zip，靠 zip 内部结构区分；PDF/图片看魔数；文本类嗅探编码后按内容特征分 md/code/txt；旧二进制 office（.doc/.xls/.ppt）识别为 ole2。
-2. **解析**：每种格式走对应解析器（见下表），产出 Markdown 正文。
-3. **去噪与提取**：折叠空行、去明显页码行、去行尾空白；提取正文、表格、内嵌图（OCR）。
-4. **分类**：`mapping`（文件名 glob）→ `keywords`（文件名+正文命中关键词最多者）→ 默认类目，全由配置驱动。
+2. **解析**（ProcessPool 并行）：每种格式走对应解析器（见下表），产出 Markdown 正文。解析器只提取文字/表格/图片，不做 OCR——图片存盘后插入 `<!-- ocr:type:dest -->` 占位，OCR 留到收尾阶段执行。解析器不加载 OCR 引擎，worker 进程轻量（避免多进程内存爆炸）。
+3. **OCR**（ThreadPool 并行）：收尾阶段在 parent 进程执行，单实例 OCR 引擎，多线程并行处理图片（ONNX Runtime 线程安全）。WMF/EMF 格式自动跳过（Linux 无解码器），defer 给 stage2。
+4. **去噪与分类**：折叠空行、去明显页码行、去行尾空白；分类由配置驱动；摘要取首个正文段（跳过标题/图片/表格/列表）。
 5. **落盘**：写 front-matter + 正文 md 到 `docs/<类目>/`；原件复制（或 `--move` 移动）到 `original-doc/`；提取的内嵌图存 `original-doc/<doc-id>_assets/`。
 6. **入目录**：更新 `catalog.yaml` + `handoff.yaml`（每次从全量 manifest 重建）。
 7. **增量清理**：哈希未变则跳过；源文件删除则清理其 md/原件/条目；格式变为不支持则转 defer（见下）。
+
+**为什么解析用 ProcessPool、OCR 用 ThreadPool？** 解析阶段 fitz（PDF 表格检测）在 C 层有全局状态，线程不安全，必须进程隔离。OCR 阶段 rapidocr 底层 ONNX Runtime 的 `run()` 线程安全，用线程即可——共享同一个模型实例，零额外内存。两阶段的并行度均按硬件自动嗅探，无需人工配置。
 
 ### 各格式能力
 
 | 格式 | 能力 |
 |---|---|
-| md | pass-through；标题取首个 H1；内嵌本地图片引用跟进 OCR |
+| md | pass-through；标题取首个 H1；内嵌本地图片引用跟进提取+OCR |
 | txt / 代码 | 编码嗅探（utf-8/gbk/gb18030）；代码裹带语言标注围栏 |
 | docx | 段落/表格/有序列表(编号+层级)/粗斜体；内嵌图(段落+表格单元格)提取+OCR；公式/图表/SmartArt 检测标记 |
-| pptx | 递归展开分组图形；逐 slide 标题/正文/表格/备注；内嵌图 OCR；非文本图形标记 |
+| pptx | 递归展开分组图形；逐 slide 标题/正文/表格/备注；内嵌图提取+OCR；非文本图形标记 |
 | xlsx | 每 sheet→md 表格；合并单元格展开；无缓存公式回退显示公式文本 |
 | pdf | 大纲注入章节标题；文字块按坐标排序；表格抽取(过滤伪表, 失败时降级为仅文字层)；扫描页渲染+OCR；内嵌图标记 |
 | png / jpeg … | OCR 文本块按序拼进 md；无文字/无引擎则 defer |
 
 ### OCR
 
-用 `rapidocr-onnxruntime`（PP-OCR 模型转 ONNX，中英文）。运行时检测：有引擎就 OCR，无引擎或初始化失败则缓存失败状态不再重试，图片 defer 给 stage 2。OCR 是可选增强——不装处理器照常跑，只是图片类内容标 defer。
+用 `rapidocr-onnxruntime`（PP-OCR 模型转 ONNX，中英文）。OCR 在收尾阶段 parent 进程执行（不在解析 worker 中），单实例引擎 + ThreadPool 多线程并行，避免多进程内存爆炸。WMF/EMF 格式自动跳过（Linux 无 Pillow 解码器），defer 给 stage2。运行时检测：有引擎就 OCR，无引擎或初始化失败则缓存失败状态不再重试，图片 defer 给 stage 2。OCR 是可选增强——不装处理器照常跑，只是图片类内容标 defer。
 
 ### 分类、摘要、章节索引（确定性，不调大模型）
 
@@ -316,7 +318,7 @@ ai-doc2md/
 │   ├── config.py          # 配置加载 + 通用分类
 │   ├── manifest.py        # 增量 manifest
 │   ├── catalog.py         # catalog.yaml + handoff.yaml 生成
-│   ├── pipeline.py        # 主流程编排 (三阶段: 串行预处理→并行解析→串行收尾)
+│   ├── pipeline.py        # 主流程编排 (三阶段: 串行预处理→ProcessPool并行解析→串行收尾[ThreadPool OCR+去噪+分类])
 │   ├── cli.py             # CLI + 跨平台适配
 │   ├── util.py            # 工具函数
 │   └── parsers/           # 各格式解析器（md/text/image/xlsx/docx/pptx/pdf）
@@ -336,7 +338,7 @@ python tests/run_all.py          # 退出码 0=全过，1=有失败
 python tests/run_all.py -v        # 详细（含失败堆栈）
 ```
 
-覆盖：格式识别（含扩展名改错诱饵+多编码）、各格式解析输出正确性（docx 表格图/有序列表/公式标记/图表标记、pptx 分组递归、pdf 大纲/扫描页/表格/降级、xlsx 公式/合并展开/截断、md 内嵌图/远程图片跳过/无H1 fallback、image OCR 正向/纯图无文字defer）、去噪（toc/summary 围栏感知/clean_text/strip_boilerplate/空summary）、config 容错、分类优先级（mapping>keywords>default）、路径校验、空/二进制/旧 office、大文件、损坏 pdf/docx/xlsx/pptx/图片、OCR 失败缓存、中断保存、增量全链路（跳过/新增/重处理/删除清理/同时增删改/3次以上/删除恢复doc-id/配置变更重分类/格式变 defer/重分类剪枝/旧 assets 清理）、deferred 结构化（front-matter/catalog 每文档上下文/标记正则/聚合/多type同文档/标记位置/无defer不噪声/stage2_pending 在 handoff 不在 catalog/handoff 完整性/面向对象注释）、零参数模式（自动定位输入/输出/config/增量重跑/config在输入目录/嵌套子目录/move后空/输出自动创建/排除输出目录/多候选选最多/混用参数/无文档报错）、--move、多格式混合端到端、原件保留验证、catalog 精简无 toc/sections + md 目录渲染 + front-matter 合法性、并行处理（两次运行确定性/10文件顺序不受进程影响/混合格式正确）、doc-id 稳定性。
+覆盖：格式识别（含扩展名改错诱饵+多编码）、各格式解析输出正确性（docx 表格图/有序列表/公式标记/图表标记、pptx 分组递归、pdf 大纲/扫描页/表格/降级、xlsx 公式/合并展开/截断、md 内嵌图/远程图片跳过/无H1 fallback、image OCR 正向/纯图无文字defer）、OCR 引擎失败缓存/WMF-EMF格式跳过、去噪（toc/summary 围栏感知/clean_text/strip_boilerplate/空summary/表格行不取summary）、config 容错、分类优先级（mapping>keywords>default）、路径校验、空/二进制/旧 office、大文件、损坏 pdf/docx/xlsx/pptx/图片、中断保存、增量全链路（跳过/新增/重处理/删除清理/同时增删改/3次以上/删除恢复doc-id/配置变更重分类/格式变 defer/重分类剪枝/旧 assets 清理）、deferred 结构化（front-matter/catalog 每文档上下文/标记正则/聚合/多type同文档/标记位置/无defer不噪声/stage2_pending 在 handoff 不在 catalog/handoff 完整性/面向对象注释）、零参数模式（自动定位输入/输出/config/增量重跑/config在输入目录/嵌套子目录/move后空/输出自动创建/排除输出目录/多候选选最多/混用参数/无文档报错）、--move、多格式混合端到端、原件保留验证、catalog 精简无 toc/sections + md 目录渲染 + front-matter 合法性、并行处理（两次运行确定性/10文件顺序不受进程影响/混合格式正确）、doc-id 稳定性。
 
 ---
 

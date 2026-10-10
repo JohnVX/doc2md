@@ -45,6 +45,17 @@ def _engine_obj():
     return _engine
 
 
+def is_ocr_supported(blob):
+    """检测图片格式是否可 OCR. WMF/EMF 在 Linux 无 Pillow 解码器, 直接跳过."""
+    if not blob or len(blob) < 4:
+        return False
+    if blob[:4] == b'\xd7\xcd\xc6\x9a':  # WMF magic
+        return False
+    if blob[:4] == b'\x01\x00\x00\x00' and len(blob) > 44 and blob[40:44] == b' EMF':  # EMF
+        return False
+    return True
+
+
 def ocr_image(img, ctx=None):
     """对图片 OCR, 返回按块顺序拼接的纯文本(每块一行). 无文本/无引擎返回 ''.
 

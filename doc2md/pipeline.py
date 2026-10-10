@@ -1,27 +1,106 @@
-"""主流程: 扫描输入 -> 识别 -> [并行解析] -> 去噪 -> 分类 -> 落 md + 拷原文件 -> 目录 -> 增量.
+"""主流程: 扫描输入 -> 识别 -> [并行解析] -> [ThreadPool OCR] -> 去噪 -> 分类 -> 落 md + 拷原文件 -> 目录 -> 增量.
 
-三阶段: serial 预处理(检测/sha/跳过/重分类) -> parallel 解析(ProcessPool, 进程隔离) -> serial 收尾.
-用 ProcessPool 而非 ThreadPool: fitz.Page.find_tables() 在 C 层有全局状态, 线程不安全.
+三阶段: serial 预处理(检测/sha/跳过/重分类) -> ProcessPool 并行解析(进程隔离) -> serial 收尾(ThreadPool OCR+去噪+分类+写).
+解析用 ProcessPool 而非 ThreadPool: fitz.Page.find_tables() 在 C 层有全局状态, 线程不安全.
+OCR 用 ThreadPool 而非 ProcessPool: ONNX Runtime run() 线程安全, 共享单实例引擎零额外内存.
+OCR 在收尾阶段(parent 进程)执行: parser 只存图+插占位 <!-- ocr:type:dest -->,
+_post_ocr 替换占位为 OCR 文本或 defer 标记. 避免多 worker 各加载 OCR 引擎(~400MB/进程)致 OOM.
+并行度自动嗅探 (CPU 核数 + 可用内存), 无需人工配置.
 parser 返回的 deferred (结构化 stage2 待处理项) 经 aggregate_deferred 合并后
 写入 front-matter / manifest / catalog, 供 stage2 agent 编程查询.
 """
 import logging
+import os
 import re
 import shutil
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import yaml
 
-from . import catalog, denoise, detector, manifest, parsers, util
+from . import catalog, denoise, detector, manifest, ocr, parsers, util
 from .config import load_config
 from .parsers._common import aggregate_deferred, defer
 
 log = logging.getLogger("pipeline")
 
 LARGE_FILE_MB = 50  # 超过此值给出慢速警告
-MAX_WORKERS = 4     # 并行解析进程上限 (内存安全: 3.7GB 环境)
+MAX_WORKERS = None   # None=自动嗅探; 测试可设为 1 强制串行
+MAX_OCR_THREADS = None  # None=自动嗅探
+
+_OCR_RE = re.compile(r'<!-- ocr:(img|scan):(\S+) -->')
+
+
+def _detect_resources():
+    """自动嗅探 CPU 核数和可用内存, 返回 (max_workers, max_ocr_threads, cpus, avail_mb).
+
+    无需人工配置: 根据硬件自动调节激进程度.
+    - MAX_WORKERS (ProcessPool 解析): 每进程 ~500MB, 受 CPU 和内存约束, 上限 8
+    - MAX_OCR_THREADS (ThreadPool OCR): rapidocr ~500MB + 每线程 ~200MB, 上限 8
+    """
+    cpus = os.cpu_count() or 2
+
+    avail_mb = 2048  # 保守默认 (无 psutil 时)
+    try:
+        import psutil
+        avail_mb = psutil.virtual_memory().available // (1024 * 1024)
+    except ImportError:
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        avail_mb = int(line.split()[1]) // 1024
+                        break
+        except Exception:
+            pass
+
+    max_workers = min(cpus * 2, max(1, avail_mb // 500), 8)
+    ocr_budget = max(0, avail_mb - 1024)
+    max_ocr = min(cpus, max(1, ocr_budget // 200), 8)
+    return max_workers, max_ocr, cpus, avail_mb
+
+
+def _post_ocr(body, out, doc_id, deferred_list):
+    """收尾阶段 OCR: 替换 <!-- ocr:type:dest --> 占位为 OCR 文本或 defer 标记.
+
+    parser 在 worker 进程中只存图+插占位, 不加载 OCR 引擎 (避免多进程内存爆炸).
+    本函数在 parent 进程执行, ThreadPool 并行 OCR (ONNX Runtime 线程安全,
+    共享单实例引擎, 零额外内存). defer() 的 list.append 受 GIL 保护, 线程安全.
+    """
+    adir = out / "original-doc" / f"{doc_id}_assets"
+    matches = list(_OCR_RE.finditer(body))
+    if not matches:
+        return body
+
+    def ocr_one(m):
+        """单图 OCR: 返回替换文本 (OCR 文本块或 defer 标记)."""
+        ocr_type, dest = m.group(1), m.group(2)
+        asset_path = adir / dest
+        if not asset_path.exists():
+            return defer(deferred_list, "scan-page" if ocr_type == "scan" else "image-ocr", 1, "资产文件丢失")
+        blob = asset_path.read_bytes()
+        if not ocr.is_ocr_supported(blob):
+            return defer(deferred_list, "scan-page" if ocr_type == "scan" else "image-ocr", 1, "WMF/EMF格式不支持OCR")
+        txt = ocr.ocr_image(blob)
+        if txt:
+            return f"```\n{txt}\n```"
+        return defer(deferred_list, "scan-page" if ocr_type == "scan" else "image-ocr", 1)
+
+    if len(matches) == 1:
+        return _OCR_RE.sub(ocr_one, body)
+
+    with ThreadPoolExecutor(max_workers=min(MAX_OCR_THREADS, len(matches))) as pool:
+        replacements = list(pool.map(ocr_one, matches))
+
+    parts = []
+    last_end = 0
+    for m, repl in zip(matches, replacements):
+        parts.append(body[last_end:m.start()])
+        parts.append(repl)
+        last_end = m.end()
+    parts.append(body[last_end:])
+    return "".join(parts)
 
 
 def _parse_failure(p, rel, ex):
@@ -104,8 +183,17 @@ def _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_tim
     返回 "ok" 或 "write_fail"(写 md 失败, 调用方计 errors 且不入 manifest).
     """
     t0 = time.time()
+    # md parser 登记的 side files 先拷到 assets (OCR 需读这些文件)
+    for src, dest in parsed.get("meta", {}).get("side_files", []):
+        adir = out / "original-doc" / f"{doc_id}_assets"
+        adir.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(src, str(adir / dest))
+        except Exception as ex:
+            log.warning("side file 拷贝失败 %s: %s", src, ex)
     body = denoise.clean_text(parsed["body"])
     body = denoise.strip_boilerplate(body)
+    body = _post_ocr(body, out, doc_id, parsed.setdefault("deferred", []))
     title = parsed.get("title") or p.stem
     category = conf.classify(p.name, title + "\n" + body[:4000])
     if category not in conf.categories_set():
@@ -132,15 +220,6 @@ def _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_tim
             shutil.copy2(str(p), str(dst_orig))
     except Exception as ex:
         log.warning("原文件拷贝失败 %s: %s", rel, ex)
-
-    # md parser 登记的 side files (内嵌本地图片引用) 一并拷到 assets
-    for src, dest in parsed.get("meta", {}).get("side_files", []):
-        adir = out / "original-doc" / f"{doc_id}_assets"
-        adir.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.copy2(src, str(adir / dest))
-        except Exception as ex:
-            log.warning("side file 拷贝失败 %s: %s", src, ex)
 
     summary = denoise.extract_summary(body)
     sections = denoise.extract_sections(body)
@@ -214,6 +293,17 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
     # 压掉 pdfminer/PIL 的内部噪声 (FontBBox 等), 只留 ERROR
     for noisy in ("pdfminer", "pdfminer.six", "PIL"):
         logging.getLogger(noisy).setLevel(logging.ERROR)
+
+    # --- 资源嗅探: 自动调节并行度 (无人工配置) ---
+    global MAX_WORKERS, MAX_OCR_THREADS
+    if MAX_WORKERS is None or MAX_OCR_THREADS is None:
+        dw, dt, cpus, avail_mb = _detect_resources()
+        if MAX_WORKERS is None:
+            MAX_WORKERS = dw
+        if MAX_OCR_THREADS is None:
+            MAX_OCR_THREADS = dt
+        log.info("硬件: %d 核 / %.1fGB 可用 -> 解析 %d 进程, OCR %d 线程",
+                 cpus, avail_mb / 1024, MAX_WORKERS, MAX_OCR_THREADS)
 
     # --- 路径校验 ---
     in_dir = Path(input_dir).resolve()
@@ -297,41 +387,55 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
         interrupted = True
         log.warning("收到中断信号 (扫描阶段), 保存已处理部分并退出...")
 
+    if not interrupted:
+        log.info("扫描完成: %d 待解析, %d 跳过, %d 不支持 (共 %d 文件)",
+                 len(parse_items), skipped, len(finalize_items), len(files))
+
     # === 阶段 2: 并行解析 (ProcessPool; 进程隔离: fitz find_tables 线程不安全, 必须进程级隔离) ===
     parse_results = {}  # rel -> (parsed, is_error, parse_time)
     if not interrupted and parse_items:
         max_workers = min(MAX_WORKERS, len(parse_items))
+        log.info("解析 %d 个文件 (%d 进程)...", len(parse_items), max_workers)
         pool = ProcessPoolExecutor(max_workers=max_workers)
         future_map = {}
+        item_by_rel = {}
         for item in parse_items:
             p, info, rel, sha, doc_id, ctx, handler = item
             future_map[rel] = pool.submit(_parse_worker, handler, str(p), ctx)
+            item_by_rel[rel] = item
         try:
-            for item in parse_items:
-                p, info, rel, sha, doc_id, ctx, handler = item
-                future = future_map[rel]
+            for future in as_completed(future_map.values()):
+                rel = next(r for r, f in future_map.items() if f is future)
+                p = item_by_rel[rel][0]
                 if interrupted and not future.done():
                     future.cancel()
                     continue
                 try:
                     parsed, parse_time = future.result()
                     parse_results[rel] = (parsed, False, parse_time)
+                    log.info("解析完成: %s (%.1fs)", rel, parse_time)
                 except KeyboardInterrupt:
                     interrupted = True
                 except Exception as ex:
                     parsed = _parse_failure(p, rel, ex)
                     errors += 1
                     parse_results[rel] = (parsed, True, 0.0)
+                    log.info("解析失败: %s", rel)
         except KeyboardInterrupt:
             interrupted = True
         finally:
             for f in future_map.values():
                 f.cancel()
-            pool.shutdown(wait=False, cancel_futures=True)
+            # wait=True: 确保 worker 进程退出后再进 Phase 3, 释放内存给 OCR 用
+            pool.shutdown(wait=True, cancel_futures=True)
         if interrupted:
             log.warning("收到中断信号 (解析阶段), 保存已处理部分并退出...")
 
-    # === 阶段 3: 串行收尾 (按原排序, 确定性输出) ===
+    # === 阶段 3: 串行收尾 (OCR + 去噪 + 分类 + 写 md; 按原排序, 确定性输出) ===
+    n_ocr = sum(len(_OCR_RE.findall(pr[0]["body"]))
+                for pr in parse_results.values() if not pr[1])
+    if n_ocr:
+        log.info("OCR: %d 张图片 (%d 线程)...", n_ocr, MAX_OCR_THREADS)
     try:
         for item in parse_items:
             p, info, rel, sha, doc_id, ctx, handler = item
