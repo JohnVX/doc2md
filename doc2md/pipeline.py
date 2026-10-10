@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -35,29 +36,52 @@ _OCR_RE = re.compile(r'<!-- ocr:(img|scan):(\S+) -->')
 def _detect_resources():
     """自动嗅探 CPU 核数和可用内存, 返回 (max_workers, max_ocr_threads, cpus, avail_mb).
 
-    无需人工配置: 根据硬件自动调节激进程度.
+    无需人工配置: 根据硬件自动调节, 最多吃 ~80% 资源, 留余量给系统/其他程序.
     - MAX_WORKERS (ProcessPool 解析): 每进程 ~500MB, 受 CPU 和内存约束, 上限 8
-    - MAX_OCR_THREADS (ThreadPool OCR): rapidocr ~500MB + 每线程 ~200MB, 上限 8
+    - MAX_OCR_THREADS (ThreadPool OCR): OMP_NUM_THREADS=1 时每线程 1 核,
+      取 cpu*0.8 (向下取整), 不加人工 cap
     """
     cpus = os.cpu_count() or 2
 
-    avail_mb = 2048  # 保守默认 (无 psutil 时)
+    avail_mb = 2048  # 保守默认
     try:
         import psutil
         avail_mb = psutil.virtual_memory().available // (1024 * 1024)
     except ImportError:
-        try:
-            with open("/proc/meminfo") as f:
-                for line in f:
-                    if line.startswith("MemAvailable:"):
-                        avail_mb = int(line.split()[1]) // 1024
-                        break
-        except Exception:
-            pass
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                class _MemStatus(ctypes.Structure):
+                    _fields_ = [
+                        ("dwLength", ctypes.c_ulong),
+                        ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                    ]
+                ms = _MemStatus()
+                ms.dwLength = ctypes.sizeof(ms)
+                ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
+                avail_mb = ms.ullAvailPhys // (1024 * 1024)
+            except Exception:
+                pass
+        else:
+            try:
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        if line.startswith("MemAvailable:"):
+                            avail_mb = int(line.split()[1]) // 1024
+                            break
+            except Exception:
+                pass
 
     max_workers = min(cpus * 2, max(1, avail_mb // 500), 8)
-    ocr_budget = max(0, avail_mb - 1024)
-    max_ocr = min(cpus, max(1, ocr_budget // 200), 8)
+    ocr_budget = max(0, int(avail_mb * 0.8) - 1024)
+    max_ocr = min(max(1, int(cpus * 0.8)), max(1, ocr_budget // 200))
     return max_workers, max_ocr, cpus, avail_mb
 
 

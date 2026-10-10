@@ -8,4 +8,5 @@ openpyxl>=3.0.9
 PyMuPDF>=1.23
 Pillow>=9
 PyYAML>=6.0
+psutil>=5.9   # 可选: 自动资源嗅探 (不装时 Windows 用 ctypes 兜底, Linux 用 /proc/meminfo)
 rapidocr-onnxruntime>=1.3   # 可选: 图片/扫描页 OCR

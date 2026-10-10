@@ -1,9 +1,15 @@
 """OCR 封装: rapidocr-onnxruntime 单例 + import 检测 + 无引擎时兜底 defer.
 
 通用, 不针对任何具体图片内容. img 可为路径或 bytes.
+OMP_NUM_THREADS=1: 限制 ONNX Runtime 每次推理用 1 线程,
+并行由 pipeline 的 ThreadPool 提供 (线程安全, 共享单实例引擎零额外内存).
+不设此值时 ONNX 默认用 cpu_count 线程, N 个 OCR 线程 × cpu_count = 线程爆炸.
 """
 import logging
+import os
 import threading
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 log = logging.getLogger("ocr")
 
