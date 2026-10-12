@@ -16,7 +16,7 @@
 - **统一索引**：全局 `catalog.yaml` 列出每份资料的 id / 标题 / 类目 / 来源 / 摘要，agent 据此定位再读正文；章节结构在 md 正文里（标题锚点 + 长 md 顶部渲染目录）。
 - **去噪 + 提取**：每种格式用对应工具解析，去样板噪声，提取正文、表格、图片中的文字（OCR）。
 - **确定性与可复现**：同一输入产出同一结果；doc-id 由源文件相对路径哈希生成，跨平台稳定不漂移。
-- **并行加速**：多文件解析自动并行（ProcessPool），OCR 多图并行（ThreadPool），并行度按硬件自动嗅探（CPU 核数 + 可用内存），输出顺序按文件名排序不受进程影响，确定性不变。
+- **并行加速**：多文件解析自动并行（ProcessPool），OCR 多图并行（Linux: ProcessPool / Windows: ThreadPool，按平台自动选择），并行度按硬件自动嗅探（CPU 核数 + 可用内存），输出顺序按文件名排序不受进程影响，确定性不变。
 - **不预设领域**：类目体系完全由配置定义，换一份 `config.yaml` 即可从「安全审计」切到「法规」「产品手册」等任何领域，代码不动。
 - **不依赖大模型**：分类、摘要、标题选取全用规则与抽取式，OCR 用本地引擎。
 
@@ -36,17 +36,17 @@
 2. **解析 + OCR + 落盘**（两种模式，按可用内存自动选择）：解析器只提取文字/表格/图片，不做 OCR——图片存盘后插入 `<!-- ocr:type:dest -->` 占位，OCR 留到收尾时替换。解析器不加载 OCR 引擎，worker 进程轻量（避免多进程内存爆炸）。
    - **批量模式**（≥4GB 可用内存）：ProcessPool 并行解析全部文件 → shutdown pool（杀 worker）→ OCR + 去噪 + 分类 + 写 md。worker 与 OCR 不重叠，CPU 不叠加。
    - **流式模式**（<4GB）：解析一个 → 立即 OCR + 写出 + `gc.collect()` → 再解析下一个。低内存安全。
-3. **OCR**（ThreadPool 并行）：单实例 OCR 引擎，多线程并行处理图片（ONNX Runtime 线程安全）。WMF/EMF 格式自动跳过（Linux 无解码器），defer 给 stage2。
+3. **OCR**（平台自适应并行）：Linux batch+图≥50 用 ProcessPool（独立引擎，无 ONNX session 锁）；其余用 ThreadPool（共享引擎，ONNX `run()` 释放 GIL）。WMF/EMF 格式自动跳过（Linux 无解码器），defer 给 stage2。
 4. **去噪与分类**：折叠空行、去明显页码行、去行尾空白；分类由配置驱动；摘要取首个正文段（跳过标题/图片/表格/列表）。
 5. **落盘**：写 front-matter + 正文 md 到 `docs/<类目>/`；原件复制（或 `--move` 移动）到 `original-doc/`；提取的内嵌图存 `original-doc/<doc-id>_assets/`。
 6. **入目录**：更新 `catalog.yaml` + `handoff.yaml`（每次从全量 manifest 重建）。
 7. **增量清理**：哈希未变则跳过；源文件删除则清理其 md/原件/条目；格式变为不支持则转 defer（见下）。
 
-**为什么解析用 ProcessPool、OCR 用 ThreadPool？** 解析阶段 fitz（PDF 表格检测）在 C 层有全局状态，线程不安全，必须进程隔离。OCR 阶段 rapidocr 底层 ONNX Runtime 的 `run()` 线程安全，用线程即可——共享同一个模型实例，零额外内存。批量模式先解析完再 OCR（不重叠），流式模式解析一个立即 OCR+写出+`gc.collect()`（低内存安全）。并行度按硬件自动嗅探，无需人工配置。
+**解析与 OCR 并行策略：** 解析阶段 fitz（PDF 表格检测）在 C 层有全局状态，线程不安全，用 ProcessPool。OCR 阶段按平台自动选择：Linux 上 batch + 图≥50 时用 ProcessPool（fork 轻量，各进程独立 ONNX session 无锁）；Windows 上始终 ThreadPool（spawn 开销过高，实测慢 3-5 倍）。ThreadPool 模式共享单实例引擎，ONNX `run()` 释放 GIL 提供部分并行。批量模式先解析完再 OCR（不重叠），流式模式解析一个立即 OCR+写出+`gc.collect()`（低内存安全）。并行度按硬件自动嗅探，无需人工配置。
 
 **系统级资源限制（CPU + 内存，子进程继承）：**
-- **Windows**：CPU 亲和性（`SetProcessAffinityMask` → 60% 核心）+ Job Object（内存硬上限）+ BELOW_NORMAL 优先级。子进程继承亲和性与 Job Object，ONNX/OpenCV 内部线程也无法绕过。
-- **Linux**：CPU 亲和性（`sched_setaffinity` → 60% 核心）+ `RLIMIT_AS`（单进程虚拟地址空间上限）+ `nice +10`。
+- **Windows**：CPU 亲和性（`SetProcessAffinityMask` → 60% 核心）+ Job Object（内存硬上限，整个进程树）。子进程继承，ONNX/OpenCV 内部线程也无法绕过。
+- **Linux**：CPU 亲和性（`sched_setaffinity` → 60% 核心）+ `RLIMIT_AS`（单进程虚拟地址空间上限，防泄漏）。
 - **两层互补**：系统级是硬上限（安全网，防 CPU 100%），应用级是优化（读亲和性后实际核数，决定 spawn 几个进程，避免上下文切换）。
 
 ### 各格式能力
@@ -63,7 +63,7 @@
 
 ### OCR
 
-用 `rapidocr-onnxruntime`（PP-OCR 模型转 ONNX，中英文）。OCR 在 parent 进程执行（不在解析 worker 中），单实例引擎 + ThreadPool 多线程并行，避免多进程内存爆炸。WMF/EMF 格式自动跳过（Linux 无 Pillow 解码器），defer 给 stage2。运行时检测：有引擎就 OCR，无引擎或初始化失败则缓存失败状态不再重试，图片 defer 给 stage 2。OCR 是可选增强——不装处理器照常跑，只是图片类内容标 defer。
+用 `rapidocr-onnxruntime`（PP-OCR 模型转 ONNX，中英文）。OCR 在 parent 进程执行（不在解析 worker 中）。并行模式按平台自动选择：Linux batch+图≥50 → ProcessPool（fork 轻量，各进程独立引擎无锁）；其余 → ThreadPool（共享引擎，ONNX `run()` 释放 GIL）。ONNX 推理线程数 monkey-patch 为 1（`intra_op_num_threads=1`），防止多线程×多进程线程爆炸。WMF/EMF 格式自动跳过（Linux 无 Pillow 解码器），defer 给 stage2。运行时检测：有引擎就 OCR，无引擎或初始化失败则缓存失败状态不再重试，图片 defer 给 stage 2。OCR 是可选增强——不装处理器照常跑，只是图片类内容标 defer。
 
 ### 分类、摘要、章节索引（确定性，不调大模型）
 
