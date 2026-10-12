@@ -25,7 +25,7 @@ def test_zero_arg_incremental():
     root = tempfile.mkdtemp(prefix="d2m_za_")
     in_dir = os.path.join(root, "src")
     os.makedirs(in_dir)
-    with open(os.path.join(in_dir, "a.txt"), "w") as f:
+    with open(os.path.join(in_dir, "a.txt"), "w", encoding="utf-8") as f:
         f.write("a\n")
     out_dir = os.path.join(root, "knowledge")
     try:
@@ -33,7 +33,7 @@ def test_zero_arg_incremental():
             cli.main([])
         assert_eq(len(find_mds(out_dir)), 1)
         # 加新文件
-        with open(os.path.join(in_dir, "b.txt"), "w") as f:
+        with open(os.path.join(in_dir, "b.txt"), "w", encoding="utf-8") as f:
             f.write("b\n")
         with _chdir(root):
             cli.main([])
@@ -52,10 +52,10 @@ def test_config_in_input_dir():
     root = tempfile.mkdtemp(prefix="d2m_za_")
     in_dir = os.path.join(root, "data")
     os.makedirs(in_dir)
-    with open(os.path.join(in_dir, "x.txt"), "w") as f:
+    with open(os.path.join(in_dir, "x.txt"), "w", encoding="utf-8") as f:
         f.write("x\n")
     # config 在输入目录
-    with open(os.path.join(in_dir, "config.yaml"), "w") as f:
+    with open(os.path.join(in_dir, "config.yaml"), "w", encoding="utf-8") as f:
         f.write("taxonomy: [custom]\ndefault_category: custom\n")
     out_dir = os.path.join(root, "knowledge")
     try:
@@ -80,7 +80,7 @@ def test_nested_subdirs():
     in_dir = os.path.join(root, "materials")
     sub = os.path.join(in_dir, "sub1", "sub2")
     os.makedirs(sub)
-    with open(os.path.join(sub, "deep.txt"), "w") as f:
+    with open(os.path.join(sub, "deep.txt"), "w", encoding="utf-8") as f:
         f.write("deep content\n")
     out_dir = os.path.join(root, "knowledge")
     try:
@@ -102,7 +102,7 @@ def test_zero_arg_then_move_then_empty():
     root = tempfile.mkdtemp(prefix="d2m_za_")
     in_dir = os.path.join(root, "src")
     os.makedirs(in_dir)
-    with open(os.path.join(in_dir, "a.txt"), "w") as f:
+    with open(os.path.join(in_dir, "a.txt"), "w", encoding="utf-8") as f:
         f.write("a\n")
     out_dir = os.path.join(root, "knowledge")
     try:
@@ -128,7 +128,7 @@ def test_output_dir_auto_created():
     root = tempfile.mkdtemp(prefix="d2m_za_")
     in_dir = os.path.join(root, "docs")
     os.makedirs(in_dir)
-    with open(os.path.join(in_dir, "a.txt"), "w") as f:
+    with open(os.path.join(in_dir, "a.txt"), "w", encoding="utf-8") as f:
         f.write("a\n")
     out_dir = os.path.join(root, "knowledge")
     assert_true(not os.path.exists(out_dir), "输出目录初始不存在")

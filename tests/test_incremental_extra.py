@@ -16,7 +16,7 @@ def test_new_file_added():
     p1, s1, _ = pipeline.run(in_dir, out)
     assert_eq(p1, 2)
     # 加新文件
-    with open(os.path.join(in_dir, "c.txt"), "w") as f:
+    with open(os.path.join(in_dir, "c.txt"), "w", encoding="utf-8") as f:
         f.write("ccc\n")
     p2, s2, _ = pipeline.run(in_dir, out)
     assert_eq(p2, 1, "只处理新增的 c.txt")
@@ -41,7 +41,7 @@ def test_three_runs():
     assert_eq(p2, 0)
     assert_eq(s2, 1)
     # 第3次: 加新文件
-    with open(os.path.join(in_dir, "y.txt"), "w") as f:
+    with open(os.path.join(in_dir, "y.txt"), "w", encoding="utf-8") as f:
         f.write("new\n")
     p3, s3, _ = pipeline.run(in_dir, out)
     assert_eq(p3, 1, "处理新增 y.txt")
@@ -65,7 +65,7 @@ def test_delete_then_readd_docid_stable():
     cat2 = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
     assert_eq(len(cat2["documents"]), 0, "删除后应无文档")
     # 加回同名同内容
-    with open(os.path.join(in_dir, "doc.txt"), "w") as f:
+    with open(os.path.join(in_dir, "doc.txt"), "w", encoding="utf-8") as f:
         f.write("content\n")
     pipeline.run(in_dir, out)
     cat3 = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
@@ -83,7 +83,7 @@ def test_config_change_reclassifies():
     out = make_tmp_output()
     # 第一次: 分类为 attack
     cfg1 = os.path.join(out, "_cfg1.yaml")
-    with open(cfg1, "w") as f:
+    with open(cfg1, "w", encoding="utf-8") as f:
         f.write("taxonomy: [attack, safe]\ndefault_category: safe\n"
                 "keywords:\n  attack: [漏洞, exploit]\n")
     pipeline.run(in_dir, out, cfg1)
@@ -91,7 +91,7 @@ def test_config_change_reclassifies():
     assert_eq(cat1["documents"][0]["category"], "attack")
     # 第二次: 改 config, 同文件归 safe (关键词变)
     cfg2 = os.path.join(out, "_cfg2.yaml")
-    with open(cfg2, "w") as f:
+    with open(cfg2, "w", encoding="utf-8") as f:
         f.write("taxonomy: [attack, safe]\ndefault_category: safe\n"
                 "keywords:\n  safe: [漏洞]\n")  # 漏洞现在归 safe
     pipeline.run(in_dir, out, cfg2)
@@ -114,9 +114,9 @@ def test_simultaneous_add_delete_modify():
     pipeline.run(in_dir, out)
     # 删 del.txt, 改 mod.txt, 加 new.txt
     os.remove(os.path.join(in_dir, "del.txt"))
-    with open(os.path.join(in_dir, "mod.txt"), "w") as f:
+    with open(os.path.join(in_dir, "mod.txt"), "w", encoding="utf-8") as f:
         f.write("modified\n")
-    with open(os.path.join(in_dir, "new.txt"), "w") as f:
+    with open(os.path.join(in_dir, "new.txt"), "w", encoding="utf-8") as f:
         f.write("new file\n")
     p, s, e = pipeline.run(in_dir, out)
     assert_eq(e, 0)

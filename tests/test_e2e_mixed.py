@@ -76,7 +76,7 @@ def test_e2e_with_config():
         "random.txt": "无关键词的普通文档\n",
     })
     cfg = os.path.join(make_tmp_output(), "config.yaml")
-    with open(cfg, "w") as f:
+    with open(cfg, "w", encoding="utf-8") as f:
         f.write("taxonomy: [attack-surface, architecture, misc]\n"
                 "default_category: misc\n"
                 "mapping:\n"

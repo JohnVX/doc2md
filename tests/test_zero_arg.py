@@ -27,7 +27,7 @@ def test_zero_arg_finds_input_and_output():
     root = tempfile.mkdtemp(prefix="d2m_zero_")
     in_dir = os.path.join(root, "materials")
     os.makedirs(in_dir)
-    with open(os.path.join(in_dir, "note.txt"), "w") as f:
+    with open(os.path.join(in_dir, "note.txt"), "w", encoding="utf-8") as f:
         f.write("hello\n")
     out_dir = os.path.join(root, "knowledge")
     try:
@@ -48,9 +48,9 @@ def test_zero_arg_finds_config():
     root = tempfile.mkdtemp(prefix="d2m_zero_")
     in_dir = os.path.join(root, "data")
     os.makedirs(in_dir)
-    with open(os.path.join(in_dir, "a.txt"), "w") as f:
+    with open(os.path.join(in_dir, "a.txt"), "w", encoding="utf-8") as f:
         f.write("text\n")
-    with open(os.path.join(root, "config.yaml"), "w") as f:
+    with open(os.path.join(root, "config.yaml"), "w", encoding="utf-8") as f:
         f.write("taxonomy: [cat1]\ndefault_category: cat1\n")
     out_dir = os.path.join(root, "knowledge")
     try:
@@ -86,7 +86,7 @@ def test_zero_arg_excludes_output_dir():
     root = tempfile.mkdtemp(prefix="d2m_zero_")
     in_dir = os.path.join(root, "src")
     os.makedirs(in_dir)
-    with open(os.path.join(in_dir, "x.txt"), "w") as f:
+    with open(os.path.join(in_dir, "x.txt"), "w", encoding="utf-8") as f:
         f.write("x\n")
     # 先跑一次产生 knowledge/
     out_dir = os.path.join(root, "knowledge")
@@ -112,9 +112,9 @@ def test_zero_arg_picks_most_docs():
     os.makedirs(d1)
     os.makedirs(d2)
     for i in range(3):
-        with open(os.path.join(d1, f"f{i}.txt"), "w") as f:
+        with open(os.path.join(d1, f"f{i}.txt"), "w", encoding="utf-8") as f:
             f.write(f"text{i}\n")
-    with open(os.path.join(d2, "single.txt"), "w") as f:
+    with open(os.path.join(d2, "single.txt"), "w", encoding="utf-8") as f:
         f.write("one\n")
     try:
         with _chdir(root):
@@ -137,7 +137,7 @@ def test_mixed_args_auto_fill():
     root = tempfile.mkdtemp(prefix="d2m_zero_")
     in_dir = os.path.join(root, "raw")
     os.makedirs(in_dir)
-    with open(os.path.join(in_dir, "a.txt"), "w") as f:
+    with open(os.path.join(in_dir, "a.txt"), "w", encoding="utf-8") as f:
         f.write("a\n")
     out_dir = os.path.join(root, "knowledge")
     try:
