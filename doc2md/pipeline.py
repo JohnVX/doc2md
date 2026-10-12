@@ -233,12 +233,12 @@ def _apply_system_limits(cpu_budget, cpus, avail_mb):
             else:
                 class _IO_COUNTERS(ctypes.Structure):
                     _fields_ = [
-                        ("ReadOperationCount", wintypes.ULONGLONG),
-                        ("WriteOperationCount", wintypes.ULONGLONG),
-                        ("OtherOperationCount", wintypes.ULONGLONG),
-                        ("ReadTransferCount", wintypes.ULONGLONG),
-                        ("WriteTransferCount", wintypes.ULONGLONG),
-                        ("OtherTransferCount", wintypes.ULONGLONG),
+                        ("ReadOperationCount", ctypes.c_ulonglong),
+                        ("WriteOperationCount", ctypes.c_ulonglong),
+                        ("OtherOperationCount", ctypes.c_ulonglong),
+                        ("ReadTransferCount", ctypes.c_ulonglong),
+                        ("WriteTransferCount", ctypes.c_ulonglong),
+                        ("OtherTransferCount", ctypes.c_ulonglong),
                     ]
 
                 class _BasicLimit(ctypes.Structure):
