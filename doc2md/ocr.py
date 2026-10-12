@@ -39,11 +39,10 @@ def _intra_op_single():
     monkey-patch ort.InferenceSession, 强制注入 sess_options
     (intra_op_num_threads=1, inter_op_num_threads=1).
 
-    关键: rapidocr 的 OrtInferSession 总是**自己传入 sess_options**
-    (其 config 的 intra_op_num_threads=-1 → 不设置 → ORT 默认=全部核心).
-    因此必须**覆盖**调用方传入的 sess_options, 而不只是补默认值;
-    否则 N 个并发线程 × 每 session 全核 intra_op = N×核心数 线程争抢,
-    严重超订 → 并行退化为串行 (Windows 16 核实测).
+    注意: 这是**备用**机制. 首选在构造 RapidOCR 时直接传
+    intra_op_num_threads=1 (见 _engine_obj), 因为 rapidocr 的 config 会读该值
+    并写进自己的 sess_options, 最可靠. 本 patch 作为双保险 (防旧版 rapidocr
+    或其它调用方不传 config 的情况).
     """
     try:
         import onnxruntime as ort
@@ -67,6 +66,22 @@ def _intra_op_single():
         pass
 
 
+def _new_engine():
+    """构造 RapidOCR 引擎, 强制 intra_op/inter_op = 1 (防超订).
+
+    首选路径: RapidOCR(intra_op_num_threads=1) —— rapidocr 的 OrtInferSession
+    会读该 config 值并写入 sess_options (见 _init_sess_opts, 值 -1 时不设置).
+    这是最可靠的强制单线程 op 方式, 不依赖 monkey-patch.
+    失败则回退到无参构造 (此时 _intra_op_single 的 patch 兜底).
+    """
+    from rapidocr_onnxruntime import RapidOCR
+    try:
+        return RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
+    except Exception:
+        # 旧版/不支持 kwarg 的 rapidocr: 退回补丁路径
+        return RapidOCR()
+
+
 def _engine_obj():
     """惰性初始化并返回 OCR 引擎单例; 失败缓存 _broken 不再重试."""
     global _engine, _broken
@@ -77,8 +92,7 @@ def _engine_obj():
             if _engine is None:
                 _intra_op_single()
                 try:
-                    from rapidocr_onnxruntime import RapidOCR
-                    _engine = RapidOCR()
+                    _engine = _new_engine()
                     log.info("rapidocr 引擎已就绪")
                 except Exception as e:
                     log.warning("rapidocr 引擎初始化失败, 后续图片 defer 到 stage2: %s", e)

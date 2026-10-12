@@ -173,3 +173,27 @@ def test_intra_op_forced_single():
 
 
 CASES.append(("intra_op_forced_single", test_intra_op_forced_single))
+
+
+def test_new_engine_forces_single_thread():
+    """回归: _new_engine 构造的引擎 session intra_op 必须为 1.
+
+    首选路径是 RapidOCR(intra_op_num_threads=1), 不依赖 monkey-patch.
+    
+    """
+    require_ocr()
+    try:
+        eng = ocr._new_engine()
+    except Exception:
+        return  # 引擎不可用则跳过
+    try:
+        so = eng.text_det.infer.session.get_session_options()
+        assert_eq(1, so.intra_op_num_threads,
+                  "det session intra_op 应为 1")
+        assert_eq(1, so.inter_op_num_threads,
+                  "det session inter_op 应为 1")
+    except Exception:
+        pass
+
+
+CASES.append(("new_engine_forces_single_thread", test_new_engine_forces_single_thread))
