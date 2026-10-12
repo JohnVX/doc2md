@@ -558,7 +558,7 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
             # 计数总 OCR 图数, 决策 OCR 并行模式
             total_ocr_images = sum(
                 len(_OCR_RE.findall(pr[0].get("body", "")))
-                for pr in parse_results.values() if not pr[1])
+                for pr in parse_results.values())
             if OCR_MODE is None or OCR_PROCS is None:
                 m, w = _ocr_mode_decision(batch_mode, MAX_OCR_THREADS, _avail_mb, total_ocr_images)
                 if OCR_MODE is None:
