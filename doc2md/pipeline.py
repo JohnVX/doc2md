@@ -41,6 +41,7 @@ OCR_PROCS = None  # None=自动; ProcessPool 进程数 (process 模式)
 
 _OCR_RE = re.compile(r'<!-- ocr:(img|scan):(\S+) -->')
 _ocr_pool = None  # ProcessPool for OCR (process 模式, 惰性创建, pipeline 结束后 shutdown)
+_job_handle = None  # Windows Job Object handle (防止 GC 释放)
 
 
 def _ocr_mode_decision(batch_mode, max_ocr, avail_mb, total_images):
@@ -90,17 +91,37 @@ def _ocr_proc_worker(asset_path_str):
     return ocr.ocr_image(blob)
 
 
-def _detect_resources():
-    """自动嗅探 CPU 核数和可用内存, 返回 (max_workers, max_ocr_threads, cpus, avail_mb, batch_mode).
+def _get_affinity_count():
+    """获取亲和性限制后的实际可用 CPU 核心数 (None = 不支持/失败)."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            pa = ctypes.c_size_t()
+            sa = ctypes.c_size_t()
+            ctypes.windll.kernel32.GetProcessAffinityMask(
+                ctypes.windll.kernel32.GetCurrentProcess(),
+                ctypes.byref(pa), ctypes.byref(sa))
+            return bin(pa.value).count('1')
+        elif sys.platform.startswith("linux"):
+            return len(os.sched_getaffinity(0))
+    except Exception:
+        pass
+    return None
 
-    无需人工配置: 根据硬件自动调节, 最多吃 ~60% 资源, 留余量给系统/其他程序.
-    两种模式:
-    - batch (≥4GB): 全部解析 → shutdown pool → OCR. worker 与 OCR 不重叠, CPU 不叠加.
-      3/4 预算给 OCR, 1/4 给 worker (多 worker 并行解析).
-    - streaming (<4GB): 解析一个 → 立即 OCR+写出+gc. 低内存安全.
-      OCR 拿满预算, worker=1 (避免与 OCR 叠加).
+
+def _detect_resources():
+    """嗅探硬件 + 设置系统级限制, 返回 (max_workers, max_ocr, cpus, avail_mb, batch_mode).
+
+    两层限制 (互补, 不可省任一):
+    - 系统级 (硬上限): CPU 亲和性→60%核心, Job Object→60%内存.
+      子进程继承, ONNX/OpenCV 内部线程也无法绕过. 这是安全网.
+    - 应用级 (优化): 读亲和性限制后的实际核数, 决定 spawn 几个进程.
+      避免进程数>核数导致的上下文切换. 这是吞吐优化.
+
+    batch (≥4GB): 全部解析→shutdown pool→OCR. 3/4 核给 OCR, 1/4 给 worker.
+    streaming (<4GB): 解析一个→立即 OCR+写出+gc. OCR 拿满, worker=1.
     """
-    cpus = os.cpu_count() or 2
+    raw_cpus = os.cpu_count() or 2
 
     avail_mb = 2048  # 保守默认
     try:
@@ -138,16 +159,140 @@ def _detect_resources():
             except Exception:
                 pass
 
-    cpu_budget = max(2, int(cpus * 0.6))
+    log.info("硬件: %d 核 / %.1fGB 可用", raw_cpus, avail_mb / 1024)
+
+    # 系统级限制: 60% 核 + 60% 内存 (硬上限, 子进程继承)
+    cpu_budget = max(2, int(raw_cpus * 0.6))
+    _apply_system_limits(cpu_budget, raw_cpus, avail_mb)
+
+    # 应用级: 读亲和性限制后的实际核数 (不再自己乘 0.6, 亲和性已限制)
+    cpus = _get_affinity_count() or cpu_budget
     ocr_budget_mb = max(0, int(avail_mb * 0.6) - 1024)
     batch_mode = avail_mb >= 4096
     if batch_mode:
-        max_ocr = min(max(1, cpu_budget * 3 // 4), max(1, ocr_budget_mb // 200))
-        max_workers = min(cpus * 2, max(1, avail_mb // 500), 8, max(1, cpu_budget - max_ocr))
+        max_ocr = min(max(1, cpus * 3 // 4), max(1, ocr_budget_mb // 200))
+        max_workers = min(cpus * 2, max(1, avail_mb // 500), 8, max(1, cpus - max_ocr))
     else:
-        max_ocr = min(max(1, cpu_budget), max(1, ocr_budget_mb // 200))
+        max_ocr = min(max(1, cpus), max(1, ocr_budget_mb // 200))
         max_workers = 1
+    log.info("配置: 解析 %d 进程, OCR %d 线程 (%s)",
+             max_workers, max_ocr, "批量" if batch_mode else "流式")
     return max_workers, max_ocr, cpus, avail_mb, batch_mode
+
+
+def _apply_system_limits(cpu_budget, cpus, avail_mb):
+    """从系统层面限制 CPU 和内存 (子进程自动继承).
+
+    Windows:
+      1. CPU 亲和性: SetProcessAffinityMask → 只用 cpu_budget 个核心.
+         子进程继承掩码, ONNX/OpenCV 内部线程也无法绕过.
+      2. 进程优先级: BELOW_NORMAL → 系统忙时自动让出 CPU.
+      3. Job Object: 内存硬上限 (整个进程树 commit 总量, 超限则分配失败).
+    Linux:
+      1. CPU 亲和性: sched_setaffinity.
+      2. nice +10.
+      3. RLIMIT_AS: 单进程虚拟地址空间上限 (防泄漏, 非 tree-wide; tree-wide 需 cgroups/root).
+    """
+    global _job_handle
+    parts = []
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            k32 = ctypes.windll.kernel32
+            hProc = k32.GetCurrentProcess()
+
+            # 1. CPU 亲和性: 限制到 cpu_budget 个核心
+            mask = (1 << cpu_budget) - 1
+            k32.SetProcessAffinityMask(hProc, mask)
+            parts.append(f"CPU亲和={cpu_budget}/{cpus}核")
+
+            # 2. 进程优先级: BELOW_NORMAL
+            BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+            k32.SetPriorityClass(hProc, BELOW_NORMAL_PRIORITY_CLASS)
+            parts.append("优先级=BELOW_NORMAL")
+
+            # 3. Job Object: 内存硬上限 (整个进程树)
+            hJob = k32.CreateJobObjectW(None, None)
+
+            class _IO_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("ReadOperationCount", wintypes.ULONGLONG),
+                    ("WriteOperationCount", wintypes.ULONGLONG),
+                    ("OtherOperationCount", wintypes.ULONGLONG),
+                    ("ReadTransferCount", wintypes.ULONGLONG),
+                    ("WriteTransferCount", wintypes.ULONGLONG),
+                    ("OtherTransferCount", wintypes.ULONGLONG),
+                ]
+
+            class _BasicLimit(ctypes.Structure):
+                _fields_ = [
+                    ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+                    ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("Priority", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD),
+                ]
+
+            class _ExtendedLimit(ctypes.Structure):
+                _fields_ = [
+                    ("BasicLimitInformation", _BasicLimit),
+                    ("IoInfo", _IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t),
+                ]
+
+            JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x100
+            JOB_OBJECT_LIMIT_JOB_MEMORY = 0x200
+            mem_limit = int(avail_mb * 0.6) * 1024 * 1024  # bytes
+
+            ext = _ExtendedLimit()
+            ext.BasicLimitInformation.LimitFlags = (
+                JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_JOB_MEMORY)
+            ext.ProcessMemoryLimit = mem_limit
+            ext.JobMemoryLimit = mem_limit
+            k32.SetInformationJobObject(
+                hJob, 9,  # JobObjectExtendedLimitInformation
+                ctypes.byref(ext), ctypes.sizeof(ext))
+
+            k32.AssignProcessToJobObject(hJob, hProc)
+            _job_handle = hJob  # 防 GC 释放
+
+            mem_gb = int(avail_mb * 0.6) / 1024
+            parts.append(f"内存硬上限={mem_gb:.0f}GB")
+
+        except Exception as ex:
+            log.debug("系统限制 (Windows) 设置失败: %s", ex)
+
+    elif sys.platform.startswith("linux"):
+        try:
+            os.sched_setaffinity(0, set(range(cpu_budget)))
+            parts.append(f"CPU亲和={cpu_budget}/{cpus}核")
+        except Exception:
+            pass
+        try:
+            os.nice(10)
+            parts.append("nice=+10")
+        except Exception:
+            pass
+        try:
+            import resource
+            mem_per_proc = max(4096, int(avail_mb * 0.6))  # MB, 至少 4GB/进程
+            mem_bytes = mem_per_proc * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+            parts.append(f"内存上限={mem_per_proc}MB/进程")
+        except Exception:
+            pass
+
+    if parts:
+        log.info("系统限制: %s", ", ".join(parts))
 
 
 def _post_ocr(body, out, doc_id, deferred_list):
@@ -404,9 +549,6 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
             MAX_OCR_THREADS = dt
         if BATCH_MODE is None:
             BATCH_MODE = batch_mode
-        log.info("硬件: %d 核 / %.1fGB 可用 -> 解析 %d 进程, OCR %d 线程 (%s)",
-                 cpus, _avail_mb / 1024, MAX_WORKERS, MAX_OCR_THREADS,
-                 "批量" if BATCH_MODE else "流式")
     batch_mode = BATCH_MODE
 
     # --- 路径校验 ---
@@ -568,10 +710,11 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
             # 打印决策详情
             if total_ocr_images > 0:
                 if OCR_MODE == "process":
-                    log.info("OCR 模式: %d 图 → ProcessPool %d worker "
-                             "(图//10=%d, CPU预算=%d, 内存上限=%d)",
+                    log.info("OCR 模式: %d 图 → ProcessPool %d 进程 "
+                             "(瓶颈=CPU预算%d; 每10图1进程需%d, 内存可容%d进程)",
                              total_ocr_images, OCR_PROCS,
-                             total_ocr_images // 10, MAX_OCR_THREADS,
+                             MAX_OCR_THREADS,
+                             total_ocr_images // 10,
                              max(0, (_avail_mb - 1024) // 400))
                 else:
                     reason = ("图<50" if total_ocr_images < 50 else
