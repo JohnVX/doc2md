@@ -30,6 +30,26 @@ def make_blobs(n=24, h=800, w=1100):
     return out
 
 
+def load_real_blobs(dirs):
+    """从真实资产目录加载可 OCR 图片的 bytes."""
+    import glob
+    blobs = []
+    for d in dirs:
+        for f in sorted(glob.glob(os.path.join(d, "*"))):
+            try:
+                b = open(f, "rb").read()
+            except Exception:
+                continue
+            if len(b) < 4:
+                continue
+            if b[:4] == b"\xd7\xcd\xc6\x9a":
+                continue
+            if b[:4] == b"\x01\x00\x00\x00" and len(b) > 44 and b[40:44] == b" EMF":
+                continue
+            blobs.append(b)
+    return blobs
+
+
 def main():
     print("=" * 70)
     print("Windows 诊断 v5: 完整引擎 x 不同 intra_op 的并发扩展")
@@ -39,7 +59,22 @@ def main():
     print("onnxruntime:", ort.__version__)
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    blobs = make_blobs(24)
+    # 优先用真实图片目录 (命令行参数), 否则合成图
+    import glob as _glob
+    real_dirs = [a for a in sys.argv[1:] if os.path.isdir(a)]
+    if not real_dirs:
+        # 默认找 knowledge/original-doc/*_assets
+        here = os.path.dirname(os.path.abspath(__file__))
+        repo = os.path.dirname(here)
+        real_dirs = _glob.glob(os.path.join(repo, "knowledge", "original-doc", "*_assets"))
+        real_dirs += _glob.glob("/tmp/test/knowledge/original-doc/*_assets")
+    blobs = load_real_blobs(real_dirs) if real_dirs else []
+    if blobs:
+        print("数据源: 真实图片 %d 张 (%d 目录)" % (len(blobs), len(real_dirs)))
+    else:
+        blobs = make_blobs(24)
+        print("数据源: 合成图 %d 张" % len(blobs))
+
     from concurrent.futures import ThreadPoolExecutor
 
     for intra in [1, 2, 4, -1]:
