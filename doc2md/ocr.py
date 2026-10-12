@@ -1,9 +1,13 @@
 """OCR 封装: rapidocr-onnxruntime 单例 + import 检测 + 无引擎时兜底 defer.
 
 通用, 不针对任何具体图片内容. img 可为路径或 bytes.
-OMP_NUM_THREADS=1: 限制 ONNX Runtime 每次推理用 1 线程 (Linux/OpenMP 有效).
-_intra_op_single: monkey-patch InferenceSession, 注入 sess_options
-intra_op_num_threads=1 (Windows 上 OMP_NUM_THREADS 无效, 必须改 session 选项).
+
+防超订: 构造 RapidOCR 时传 intra_op_num_threads=N (默认 1, 环境变量
+DOC2MD_OCR_INTRA_OP 可调), 并 monkey-patch InferenceSession 兜底.
+不限制时 ORT 默认用全部核心, 与 pipeline 的 ThreadPool 相乘会严重超订
+(12 线程 x 全核), 并行退化为串行. OMP_NUM_THREADS=1 在 Windows 无效,
+必须改 session 选项. 详见 _intra_op_value / _new_engine.
+
 并行由 pipeline 的 ThreadPool 提供 (ONNX run() 线程安全, 共享单实例引擎).
 """
 import logging

@@ -121,10 +121,16 @@ doc2md/
 | 条件 | 模式 | 理由 |
 |------|------|------|
 | Linux + batch + 图≥50 + 多核 + 内存够 | ProcessPool | fork 轻量，各进程独立 ONNX session 无锁 |
-| 其余（含 Windows 全部） | ThreadPool | 共享单实例引擎，ONNX `run()` 释放 GIL 提供部分并行 |
+| 其余（含 Windows 全部） | ThreadPool | 共享单实例引擎，ONNX `run()` 释放 GIL 提供并行 |
 | Windows 始终 ThreadPool | — | spawn 开销过高，实测慢 3-5 倍 |
 
-**理由**：Windows 上 `spawn` 创建新进程需重新导入所有模块 + 重新初始化 ONNX，开销远大于 fork。实测 12 worker ProcessPool 处理 156 图耗时 386s+，而 ThreadPool 仅需 198-258s。Linux 上 `fork` 几乎零成本，独立引擎消除 ONNX session 锁，真并行。
+**理由**：Windows 上 `spawn` 创建新进程需重新导入所有模块 + 重新初始化 ONNX，开销远大于 fork。Linux 上 `fork` 几乎零成本，独立引擎消除 ONNX session 锁，真并行。
+
+**ThreadPool 模式的关键优化——跨文档全局池**：batch 模式下不再逐文档新建
+ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文档的全部
+图片（`_precompute_ocr`），结果缓存后各文档查表写回。消除了逐文档池在文档
+边界处的并行度空洞（文档图数 < 线程数时尾部跑不满）。实测 Linux 2 核 155 图
+150.3s → 135.1s（+10%），空洞随核数放大。
 
 ### 4.4 两层资源限制：系统硬上限 + 应用优化
 
@@ -143,11 +149,30 @@ doc2md/
 
 **理由**：解析在 ProcessPool worker 中执行。如果每个 worker 都加载 ONNX 引擎（~400MB），N 个 worker = N×400MB，内存爆炸。占位模式让 worker 轻量，OCR 集中在 parent 进程或独立的 OCR ProcessPool（可控制进程数）。
 
-### 4.6 ONNX 推理线程数 monkey-patch 为 1
+### 4.6 ONNX 推理线程数限制为 1（防超订）
 
-**决策**：monkey-patch `onnxruntime.InferenceSession`，注入 `intra_op_num_threads=1, inter_op_num_threads=1`。
+**决策**：构造 OCR 引擎时传 `RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)`；
+并 monkey-patch `onnxruntime.InferenceSession` 兜底，强制覆盖调用方传入的
+`sess_options`。默认值 1，可用环境变量 `DOC2MD_OCR_INTRA_OP` 覆盖。
 
-**理由**：不 patch 时，每个 ONNX 推理会起 `intra_op_num_threads` 个线程。ThreadPool 模式下 12 线程 × 4 ONNX 线程 = 48 线程抢 16 核，上下文切换严重。patch 后 12×1=12，干净匹配。`OMP_NUM_THREADS=1` 在 Windows 上无效，必须改 session 选项。
+**理由**：不限制时，每个 ONNX 推理会起 `intra_op_num_threads` 个线程，默认 = 全部核心。
+ThreadPool 模式下 12 线程 × 全核 16 = 192 线程抢 16 核，**严重超订**，并行反而
+退化为准串行。实测（Windows 16 核可用，156 真实图）：
+
+| intra_op | 12 线程 OCR 耗时 |
+|---|---|
+| 全核（不限制） | ~240s（接近串行）|
+| 1 | **99.6s** |
+
+**关键坑**：rapidocr 的 `OrtInferSession` 总是**自己传入 `sess_options`**（其 config
+`intra_op_num_threads=-1` → 不设置该值 → ORT 默认全核）。因此 monkey-patch 必须
+**原地覆盖**调用方传入的 `sess_options`，而不只是补默认值——否则被绕过，`intra_op`
+实际仍为 0（全核）。更可靠的方式是构造 `RapidOCR` 时直接传 `intra_op_num_threads`
+（rapidocr 的 `UpdateParameters` 会读该 config 并写入自己的 `sess_options`），
+monkey-patch 仅作双保险。`OMP_NUM_THREADS=1` 在 Windows 上无效，必须改 session 选项。
+
+**权衡**：`intra_op=4` 在部分测量中略快（真实图 155 张 78.9s→60.0s），但该差异在
+测量噪声范围内，且 12×4=48 线程在 16 核上是 3x 超订，故默认保守取 1，环境变量可调优。
 
 ### 4.7 Batch vs Streaming，按内存自动选择
 
@@ -352,7 +377,7 @@ python tests/run_all.py          # 退出码 0=全过，1=有失败
 python tests/run_all.py -v        # 详细（含失败堆栈）
 ```
 
-130 个用例，覆盖：格式识别、各格式解析正确性、OCR（引擎失败缓存/正向出字/ProcessPool/WMF-EMF 跳过）、去噪、分类优先级、路径校验、损坏文件、中断保存、增量全链路、deferred 结构化、零参数 CLI、batch 模式输出一致性、加密 PDF defer、PPTX 内容（标题/正文/表格/备注）、特殊文件名、多 sheet xlsx、GBK 编码、代码文件围栏、verbose 模式、收尾异常不中断、并行确定性、系统资源限制。
+133 个用例，覆盖：格式识别、各格式解析正确性、OCR（引擎失败缓存/正向出字/ProcessPool/WMF-EMF 跳过）、去噪、分类优先级、路径校验、损坏文件、中断保存、增量全链路、deferred 结构化、零参数 CLI、batch 模式输出一致性、加密 PDF defer、PPTX 内容（标题/正文/表格/备注）、特殊文件名、多 sheet xlsx、GBK 编码、代码文件围栏、verbose 模式、收尾异常不中断、并行确定性、系统资源限制。
 
 ---
 
@@ -381,5 +406,5 @@ pip install -e .                       # 注册 doc2md 命令
 doc2md                                 # 零参数: 自动定位 input-examples, 输出到 ./knowledge/
 cat knowledge/index/catalog.yaml       # 看导航索引
 cat knowledge/index/handoff.yaml       # 看 stage2 交接说明
-python tests/run_all.py                # 跑回归测试 (130/130)
+python tests/run_all.py                # 跑回归测试 (133/133)
 ```
