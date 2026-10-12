@@ -120,3 +120,56 @@ def test_ocr_proc_mode_e2e():
 
 
 CASES.append(("ocr_proc_mode_e2e", test_ocr_proc_mode_e2e))
+
+
+def test_intra_op_forced_single():
+    """回归: intra_op 必须被强制为 1, 即使调用方自带 sess_options.
+
+    真实 bug: rapidocr 的 OrtInferSession 总是自己传 sess_options
+    (其 config intra_op_num_threads=-1 → 不设置 → ORT 默认=全部核心).
+    旧 patch 只在 "sess_options" 不在 kwargs 时才注入, 因此被绕过,
+    intra_op 实为 0(全核). N 线程 × 全核 → 严重超订 → Windows 16核 退化为串行.
+    本测试直接构造 "调用方传 sess_options" 的场景验证 patch 生效.
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return  # onnxruntime 未装则跳过
+    saved = getattr(ort.InferenceSession, "_d2m_patched", False)
+    orig = ort.InferenceSession
+    try:
+        # 复位状态以确保重新 patch
+        ort.InferenceSession = orig
+        if hasattr(ort.InferenceSession, "_d2m_patched"):
+            delattr(ort.InferenceSession, "_d2m_patched")
+        ocr._intra_op_single()
+        patched = ort.InferenceSession
+        assert_true(getattr(patched, "_d2m_patched", False), "patch 应生效")
+        # 模拟 rapidocr: 调用方自带 sess_options (intra_op 未设置 = ORT 默认)
+        seen = {}
+
+        class Dummy(orig):
+            def __init__(self, *a, **k):
+                seen["opts"] = k.get("sess_options")
+
+        # 用 patched 类, 但让其父类 __init__ 被换成 Dummy 记录
+        class Rec(orig):
+            def __init__(self, *a, **k):
+                raise RuntimeError("stop-after-capture")
+
+        # 直接调用 patched 的 __init__ 逻辑: 构造 kwargs 后捕获
+        caller_opts = ort.SessionOptions()
+        try:
+            patched("nonexistent.onnx", sess_options=caller_opts)
+        except Exception:
+            pass
+        # 关键断言: 调用方传入的 opts 对象被原地改为 1
+        assert_eq(caller_opts.intra_op_num_threads, 1,
+                  "传入的 sess_options.intra_op 应被强制为 1")
+        assert_eq(caller_opts.inter_op_num_threads, 1,
+                  "传入的 sess_options.inter_op 应被强制为 1")
+    finally:
+        ort.InferenceSession = orig
+
+
+CASES.append(("intra_op_forced_single", test_intra_op_forced_single))

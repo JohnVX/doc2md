@@ -36,9 +36,14 @@ def available():
 def _intra_op_single():
     """限制 ONNX Runtime 每次推理用 1 线程 (Windows 上 OMP_NUM_THREADS 无效).
 
-    monkey-patch ort.InferenceSession, 自动注入 sess_options
+    monkey-patch ort.InferenceSession, 强制注入 sess_options
     (intra_op_num_threads=1, inter_op_num_threads=1).
-    在 import rapidocr 之前调用, 确保 rapidocr 创建 session 时走 patched 版.
+
+    关键: rapidocr 的 OrtInferSession 总是**自己传入 sess_options**
+    (其 config 的 intra_op_num_threads=-1 → 不设置 → ORT 默认=全部核心).
+    因此必须**覆盖**调用方传入的 sess_options, 而不只是补默认值;
+    否则 N 个并发线程 × 每 session 全核 intra_op = N×核心数 线程争抢,
+    严重超订 → 并行退化为串行 (Windows 16 核实测).
     """
     try:
         import onnxruntime as ort
@@ -50,11 +55,11 @@ def _intra_op_single():
             _d2m_patched = True
 
             def __init__(self, *args, **kwargs):
-                if "sess_options" not in kwargs:
-                    opts = ort.SessionOptions()
-                    opts.intra_op_num_threads = 1
-                    opts.inter_op_num_threads = 1
-                    kwargs["sess_options"] = opts
+                # 始终以调用方(或新建)的 sess_options 为基准, 强制单线程 op
+                opts = kwargs.get("sess_options") or ort.SessionOptions()
+                opts.intra_op_num_threads = 1
+                opts.inter_op_num_threads = 1
+                kwargs["sess_options"] = opts
                 super().__init__(*args, **kwargs)
 
         ort.InferenceSession = _SingleThread
