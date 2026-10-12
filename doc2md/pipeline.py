@@ -533,8 +533,11 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
                 else:
                     n_ocr = len(_OCR_RE.findall(parsed.get("body", "")))
                     if n_ocr > 0 and not ocr_announced:
-                        log.info("OCR: %d 线程 (thread)...", MAX_OCR_THREADS)
+                        log.info("OCR 模式: 流式 → ThreadPool %d 线程 (低内存, 图数未知)",
+                                 MAX_OCR_THREADS)
                         ocr_announced = True
+                    if n_ocr > 0:
+                        log.info("OCR: %s, %d 张图片", rel, n_ocr)
                     status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
                     if status == "write_fail":
                         errors += 1
@@ -562,6 +565,21 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
                     OCR_MODE = m
                 if OCR_PROCS is None:
                     OCR_PROCS = w
+            # 打印决策详情
+            if total_ocr_images > 0:
+                if OCR_MODE == "process":
+                    log.info("OCR 模式: %d 图 → ProcessPool %d worker "
+                             "(图//10=%d, CPU预算=%d, 内存上限=%d)",
+                             total_ocr_images, OCR_PROCS,
+                             total_ocr_images // 10, MAX_OCR_THREADS,
+                             max(0, (_avail_mb - 1024) // 400))
+                else:
+                    reason = ("图<50" if total_ocr_images < 50 else
+                              "非batch" if not batch_mode else
+                              "max_ocr<2" if MAX_OCR_THREADS < 2 else
+                              "内存不足")
+                    log.info("OCR 模式: %d 图 → ThreadPool %d 线程 (%s)",
+                             total_ocr_images, MAX_OCR_THREADS, reason)
             if total_ocr_images > 0:
                 ocr_unit = "进程" if OCR_MODE == "process" else "线程"
                 ocr_n = OCR_PROCS if OCR_MODE == "process" else MAX_OCR_THREADS
