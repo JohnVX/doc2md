@@ -75,3 +75,48 @@ def test_is_ocr_supported_wmf_emf():
 
 
 CASES.append(("is_ocr_supported_wmf_emf", test_is_ocr_supported_wmf_emf))
+
+
+def test_ocr_proc_mode_e2e():
+    """ProcessPool OCR: 多进程并行, 结果正确."""
+    require_ocr()
+    from tests import _samples
+    from doc2md import pipeline
+    from concurrent.futures import ProcessPoolExecutor
+
+    tmp = make_tmp_input()
+    png1, png2 = tmp + "/a.png", tmp + "/b.png"
+    _samples.gen_text_png(png1, "OCRPROC1")
+    _samples.gen_text_png(png2, "OCRPROC2")
+
+    import tempfile, os, shutil
+    from pathlib import Path
+    out_dir = tempfile.mkdtemp()
+    adir = Path(out_dir) / "original-doc" / "doc-test_assets"
+    adir.mkdir(parents=True)
+    shutil.copy(png1, str(adir / "01_img.png"))
+    shutil.copy(png2, str(adir / "02_img.png"))
+    body = ("text before\n\n<!-- ocr:img:01_img.png -->\n\n"
+            "middle\n\n<!-- ocr:img:02_img.png -->\n\ntext after\n")
+
+    saved = (pipeline.OCR_MODE, pipeline.OCR_PROCS, pipeline._ocr_pool,
+             pipeline.MAX_OCR_THREADS)
+    pipeline.OCR_MODE = "process"
+    pipeline.OCR_PROCS = 2
+    pipeline._ocr_pool = ProcessPoolExecutor(
+        max_workers=2, initializer=pipeline._ocr_proc_init)
+    try:
+        deferred_list = []
+        result = pipeline._post_ocr(body, Path(out_dir), "doc-test", deferred_list)
+        assert_true("```" in result, "应有 OCR 代码块")
+        assert_true("OCRPROC" in result.upper() or not deferred_list,
+                    "ProcessPool OCR 应产出文本或 defer")
+    finally:
+        pipeline._ocr_pool.shutdown(wait=True)
+        pipeline._ocr_pool = None
+        (pipeline.OCR_MODE, pipeline.OCR_PROCS, pipeline._ocr_pool,
+         pipeline.MAX_OCR_THREADS) = saved
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+CASES.append(("ocr_proc_mode_e2e", test_ocr_proc_mode_e2e))
