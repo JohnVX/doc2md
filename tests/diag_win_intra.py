@@ -83,6 +83,17 @@ def main():
 
     from concurrent.futures import ThreadPoolExecutor
 
+    # 线程档位: 默认只测 12 (doc2md 实际用值), 快; 环境变量 DIAG_THREADS=1,4,8,12 可全扫
+    thr_env = os.environ.get("DIAG_THREADS", "12")
+    thread_counts = [int(x) for x in thr_env.split(",") if x.strip()]
+    # 抽样: DIAG_STRIDE=N 每 N 张取 1 (默认 1=全测); DIAG_LIMIT=N 取前 N 张
+    stride = int(os.environ.get("DIAG_STRIDE", "3"))
+    limit = int(os.environ.get("DIAG_LIMIT", "0"))
+    if stride > 1:
+        blobs = blobs[::stride]
+    if limit > 0:
+        blobs = blobs[:limit]
+
     for intra in [1, 2, 4, -1]:
         os.environ["DIAG_INTRA"] = str(intra)
         from rapidocr_onnxruntime import RapidOCR
@@ -99,7 +110,7 @@ def main():
         print("-" * 70)
         print("intra_op=%s (实际=%s)" % (intra, real))
         base = None
-        for nw in [1, 4, 8, 12]:
+        for nw in thread_counts:
             t = time.time()
             with ThreadPoolExecutor(max_workers=nw) as p:
                 list(p.map(eng, blobs))
