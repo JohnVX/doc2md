@@ -35,7 +35,7 @@ def test_multi_format_mixed():
         assert_eq(p, 5, "5 个文件都应处理")
         mds = find_mds(out)
         assert_eq(len(mds), 5)
-        cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml")))
+        cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
         types = sorted(d["source_type"] for d in cat["documents"])
         assert_eq(types, ["docx", "md", "pptx", "txt", "xlsx"],
                   f"应有 5 种 source_type, got {types}")
@@ -60,7 +60,7 @@ def test_original_doc_preserved():
     # source 是相对路径, 检查文件存在
     src_path = os.path.join(out, source)
     assert_true(os.path.isfile(src_path), f"原件应存在于 {src_path}")
-    content = open(src_path).read()
+    content = open(src_path, encoding="utf-8").read()
     assert_true("important content" in content, "原件内容应不变")
     cleanup(in_dir, out)
 
@@ -87,7 +87,7 @@ def test_e2e_with_config():
     out = make_tmp_output()
     _, _, e = pipeline.run(in_dir, out, cfg)
     assert_eq(e, 0)
-    cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml")))
+    cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
     by_id = {d["id"]: d for d in cat["documents"]}
     cats = {d["title"]: d["category"] for d in cat["documents"]}
     assert_eq(cats.get("attack_report"), "attack-surface", "mapping 应优先")

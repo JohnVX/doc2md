@@ -13,6 +13,11 @@ from doc2md import pipeline
 CASES = []
 
 
+def _process_or_thread_on_this_os():
+    """平台相关期望: Windows 永远 thread (spawn 开销); 其他平台在满足条件时 process."""
+    return "thread" if sys.platform == "win32" else "process"
+
+
 def test_few_images_thread():
     """20 图 → ThreadPool (启动开销不划算)."""
     mode, n = pipeline._ocr_mode_decision(True, 12, 51200, 20)
@@ -20,10 +25,11 @@ def test_few_images_thread():
 
 
 def test_threshold_50_process():
-    """50 图, batch, 大内存 → ProcessPool (Linux)."""
+    """50 图, batch, 大内存 → ProcessPool (Linux; Windows 为 thread)."""
     mode, n = pipeline._ocr_mode_decision(True, 12, 51200, 50)
-    assert_eq("process", mode)
-    assert_eq(5, n)  # 50//10=5
+    assert_eq(_process_or_thread_on_this_os(), mode)
+    if sys.platform != "win32":
+        assert_eq(5, n)  # 50//10=5
 
 
 def test_streaming_always_thread():
@@ -35,16 +41,18 @@ def test_streaming_always_thread():
 def test_many_images_capped_by_cpu():
     """500 图, CPU 预算 12 → 12 worker (cap)."""
     mode, n = pipeline._ocr_mode_decision(True, 12, 51200, 500)
-    assert_eq("process", mode)
-    assert_eq(12, n)  # min(12, 500//10=50) = 12
+    assert_eq(_process_or_thread_on_this_os(), mode)
+    if sys.platform != "win32":
+        assert_eq(12, n)  # min(12, 500//10=50) = 12
 
 
 def test_mem_limited_workers():
     """28核/4GB, 178 图 → 内存限制 worker 数."""
     # (4096-1024)//400 = 7, min(12, 17, 7) = 7
     mode, n = pipeline._ocr_mode_decision(True, 12, 4096, 178)
-    assert_eq("process", mode)
-    assert_eq(7, n)
+    assert_eq(_process_or_thread_on_this_os(), mode)
+    if sys.platform != "win32":
+        assert_eq(7, n)
 
 
 def test_low_cpu_thread():
@@ -72,9 +80,9 @@ def test_boundary_49_thread():
 
 
 def test_boundary_50_process():
-    """50 图 → ProcessPool (刚好够, Linux)."""
+    """50 图 → ProcessPool (刚好够, Linux; Windows thread)."""
     mode, n = pipeline._ocr_mode_decision(True, 12, 51200, 50)
-    assert_eq("process", mode)
+    assert_eq(_process_or_thread_on_this_os(), mode)
 
 
 def test_windows_always_thread():

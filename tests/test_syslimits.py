@@ -4,8 +4,12 @@ Windows: SetProcessAffinityMask + Job Object.
 Linux: sched_setaffinity + RLIMIT_AS.
 """
 import os
-import resource
 import sys
+
+try:
+    import resource  # 仅 Unix/Linux 可用
+except ImportError:  # Windows
+    resource = None
 
 from tests._runner import assert_true, assert_eq, SkipTest
 
