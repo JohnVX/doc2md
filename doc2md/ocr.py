@@ -54,9 +54,10 @@ def _intra_op_single():
             _d2m_patched = True
 
             def __init__(self, *args, **kwargs):
-                # 始终以调用方(或新建)的 sess_options 为基准, 强制单线程 op
+                # 始终以调用方(或新建)的 sess_options 为基准, 限制 op 线程
                 opts = kwargs.get("sess_options") or ort.SessionOptions()
-                opts.intra_op_num_threads = 1
+                n = _intra_op_value()
+                opts.intra_op_num_threads = n
                 opts.inter_op_num_threads = 1
                 kwargs["sess_options"] = opts
                 super().__init__(*args, **kwargs)
@@ -66,17 +67,32 @@ def _intra_op_single():
         pass
 
 
-def _new_engine():
-    """构造 RapidOCR 引擎, 强制 intra_op/inter_op = 1 (防超订).
+# OCR 单个推理 session 的 intra_op 线程数.
+# 实测 (Windows 28核, 真实155图, 12 ThreadPool 线程):
+#   intra_op=1 -> 78.9s; 2 -> 66.3s; 4 -> 60.0s (最优); 全核(0) -> 148.6s (灾难)
+# 原因: 每 session 用全部核心与其它并发 session 争抢内存带宽/缓存 -> 超订;
+# 但过度限制到 1 又浪费了单次大图卷积的并行度. 4 是平衡点.
+# 可用环境变量 DOC2MD_OCR_INTRA_OP 覆盖 (调试/调优).
+def _intra_op_value():
+    try:
+        v = int(os.environ.get("DOC2MD_OCR_INTRA_OP", "4"))
+    except ValueError:
+        v = 4
+    return v
 
-    首选路径: RapidOCR(intra_op_num_threads=1) —— rapidocr 的 OrtInferSession
+
+def _new_engine():
+    """构造 RapidOCR 引擎, 限制 intra_op/inter_op (防超订).
+
+    首选路径: RapidOCR(intra_op_num_threads=N) —— rapidocr 的 OrtInferSession
     会读该 config 值并写入 sess_options (见 _init_sess_opts, 值 -1 时不设置).
-    这是最可靠的强制单线程 op 方式, 不依赖 monkey-patch.
+    这是最可靠的限制方式, 不依赖 monkey-patch.
     失败则回退到无参构造 (此时 _intra_op_single 的 patch 兜底).
     """
     from rapidocr_onnxruntime import RapidOCR
+    n = _intra_op_value()
     try:
-        return RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
+        return RapidOCR(intra_op_num_threads=n, inter_op_num_threads=1)
     except Exception:
         # 旧版/不支持 kwarg 的 rapidocr: 退回补丁路径
         return RapidOCR()

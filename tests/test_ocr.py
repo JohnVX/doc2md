@@ -1,6 +1,8 @@
 """OCR 测试: 引擎失败后不重试(mock, 仅断言可观测行为); 正向 OCR 出字.
 
 rapidocr 未安装时跳过(OCR 为可选增强, 不应让测试失败)."""
+import os
+
 from tests._runner import (HAS_RAPIDOCR, assert_contains_any, assert_eq,
                             assert_true, cleanup, make_tmp_input, require_ocr)
 
@@ -123,7 +125,7 @@ CASES.append(("ocr_proc_mode_e2e", test_ocr_proc_mode_e2e))
 
 
 def test_intra_op_forced_single():
-    """回归: intra_op 必须被强制为 1, 即使调用方自带 sess_options.
+    """回归: intra_op 应被强制为配置值 (默认 4), 即使调用方自带 sess_options.
 
     真实 bug: rapidocr 的 OrtInferSession 总是自己传 sess_options
     (其 config intra_op_num_threads=-1 → 不设置 → ORT 默认=全部核心).
@@ -163,9 +165,10 @@ def test_intra_op_forced_single():
             patched("nonexistent.onnx", sess_options=caller_opts)
         except Exception:
             pass
-        # 关键断言: 调用方传入的 opts 对象被原地改为 1
-        assert_eq(caller_opts.intra_op_num_threads, 1,
-                  "传入的 sess_options.intra_op 应被强制为 1")
+        # 关键断言: 调用方传入的 opts 对象被原地改为配置值 (默认 4)
+        expect = ocr._intra_op_value()
+        assert_eq(caller_opts.intra_op_num_threads, expect,
+                  "传入的 sess_options.intra_op 应被强制为配置值")
         assert_eq(caller_opts.inter_op_num_threads, 1,
                   "传入的 sess_options.inter_op 应被强制为 1")
     finally:
@@ -176,24 +179,41 @@ CASES.append(("intra_op_forced_single", test_intra_op_forced_single))
 
 
 def test_new_engine_forces_single_thread():
-    """回归: _new_engine 构造的引擎 session intra_op 必须为 1.
+    """回归: _new_engine 构造的引擎 session intra_op 应为配置值 (默认 4).
 
-    首选路径是 RapidOCR(intra_op_num_threads=1), 不依赖 monkey-patch.
-    
+    首选路径是 RapidOCR(intra_op_num_threads=N), 不依赖 monkey-patch.
+    默认 4 (实测 12 线程下最优); 环境变量 DOC2MD_OCR_INTRA_OP 可覆盖.
     """
     require_ocr()
+    expect = ocr._intra_op_value()
     try:
         eng = ocr._new_engine()
     except Exception:
         return  # 引擎不可用则跳过
     try:
         so = eng.text_det.infer.session.get_session_options()
-        assert_eq(1, so.intra_op_num_threads,
-                  "det session intra_op 应为 1")
+        assert_eq(expect, so.intra_op_num_threads,
+                  "det session intra_op 应为配置值")
         assert_eq(1, so.inter_op_num_threads,
                   "det session inter_op 应为 1")
     except Exception:
         pass
 
 
+def test_intra_op_value_default_and_override():
+    """_intra_op_value: 默认返回 4, 环境变量可覆盖 (防超订不取全核)."""
+    old = os.environ.pop("DOC2MD_OCR_INTRA_OP", None)
+    try:
+        assert_eq(4, ocr._intra_op_value(), "默认应为 4")
+        os.environ["DOC2MD_OCR_INTRA_OP"] = "2"
+        assert_eq(2, ocr._intra_op_value(), "环境变量应覆盖")
+        os.environ["DOC2MD_OCR_INTRA_OP"] = "notint"
+        assert_eq(4, ocr._intra_op_value(), "非法值应回退默认")
+    finally:
+        os.environ.pop("DOC2MD_OCR_INTRA_OP", None)
+        if old is not None:
+            os.environ["DOC2MD_OCR_INTRA_OP"] = old
+
+
 CASES.append(("new_engine_forces_single_thread", test_new_engine_forces_single_thread))
+CASES.append(("intra_op_value_default_and_override", test_intra_op_value_default_and_override))
