@@ -4,6 +4,11 @@
 合并单元格展开填满跨度(zip 解析 sheet XML 取 mergeCell, 不整书载入);
 截断超长行(300)/列(40); 跳过空 sheet.
 """
+import warnings
+
+# 模块级设置: spawn 子进程导入此模块时即生效 (不继承主进程的 filterwarnings)
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
+
 from pathlib import Path
 
 from ._common import defer, md_table

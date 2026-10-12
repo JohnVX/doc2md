@@ -199,74 +199,95 @@ def _apply_system_limits(cpu_budget, cpus, avail_mb):
     parts = []
 
     if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.SetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.c_size_t]
+        k32.SetProcessAffinityMask.restype = wintypes.BOOL
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k32.SetInformationJobObject.restype = wintypes.BOOL
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        k32.AssignProcessToJobObject.restype = wintypes.BOOL
+
+        hProc = k32.GetCurrentProcess()
+
+        # 1. CPU 亲和性
         try:
-            import ctypes
-            from ctypes import wintypes
-            k32 = ctypes.windll.kernel32
-            hProc = k32.GetCurrentProcess()
-
-            # 1. CPU 亲和性: 限制到 cpu_budget 个核心
             mask = (1 << cpu_budget) - 1
-            k32.SetProcessAffinityMask(hProc, mask)
-            parts.append(f"CPU亲和={cpu_budget}/{cpus}核")
+            if k32.SetProcessAffinityMask(hProc, mask):
+                parts.append(f"CPU亲和={cpu_budget}/{cpus}核")
+            else:
+                log.warning("CPU亲和性失败 (GetLastError=%d)", ctypes.get_last_error())
+        except Exception as ex:
+            log.warning("CPU亲和性异常: %s", ex)
 
-            # 2. Job Object: 内存硬上限 (整个进程树)
+        # 2. Job Object: 内存硬上限 (整个进程树)
+        try:
             hJob = k32.CreateJobObjectW(None, None)
+            if not hJob:
+                log.warning("CreateJobObject失败 (GetLastError=%d)", ctypes.get_last_error())
+            else:
+                class _IO_COUNTERS(ctypes.Structure):
+                    _fields_ = [
+                        ("ReadOperationCount", wintypes.ULONGLONG),
+                        ("WriteOperationCount", wintypes.ULONGLONG),
+                        ("OtherOperationCount", wintypes.ULONGLONG),
+                        ("ReadTransferCount", wintypes.ULONGLONG),
+                        ("WriteTransferCount", wintypes.ULONGLONG),
+                        ("OtherTransferCount", wintypes.ULONGLONG),
+                    ]
 
-            class _IO_COUNTERS(ctypes.Structure):
-                _fields_ = [
-                    ("ReadOperationCount", wintypes.ULONGLONG),
-                    ("WriteOperationCount", wintypes.ULONGLONG),
-                    ("OtherOperationCount", wintypes.ULONGLONG),
-                    ("ReadTransferCount", wintypes.ULONGLONG),
-                    ("WriteTransferCount", wintypes.ULONGLONG),
-                    ("OtherTransferCount", wintypes.ULONGLONG),
-                ]
+                class _BasicLimit(ctypes.Structure):
+                    _fields_ = [
+                        ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+                        ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                        ("LimitFlags", wintypes.DWORD),
+                        ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t),
+                        ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t),
+                        ("Priority", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD),
+                    ]
 
-            class _BasicLimit(ctypes.Structure):
-                _fields_ = [
-                    ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
-                    ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
-                    ("LimitFlags", wintypes.DWORD),
-                    ("MinimumWorkingSetSize", ctypes.c_size_t),
-                    ("MaximumWorkingSetSize", ctypes.c_size_t),
-                    ("ActiveProcessLimit", wintypes.DWORD),
-                    ("Affinity", ctypes.c_size_t),
-                    ("Priority", wintypes.DWORD),
-                    ("SchedulingClass", wintypes.DWORD),
-                ]
+                class _ExtendedLimit(ctypes.Structure):
+                    _fields_ = [
+                        ("BasicLimitInformation", _BasicLimit),
+                        ("IoInfo", _IO_COUNTERS),
+                        ("ProcessMemoryLimit", ctypes.c_size_t),
+                        ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                        ("PeakJobMemoryUsed", ctypes.c_size_t),
+                    ]
 
-            class _ExtendedLimit(ctypes.Structure):
-                _fields_ = [
-                    ("BasicLimitInformation", _BasicLimit),
-                    ("IoInfo", _IO_COUNTERS),
-                    ("ProcessMemoryLimit", ctypes.c_size_t),
-                    ("JobMemoryLimit", ctypes.c_size_t),
-                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                    ("PeakJobMemoryUsed", ctypes.c_size_t),
-                ]
+                JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x100
+                JOB_OBJECT_LIMIT_JOB_MEMORY = 0x200
+                mem_limit = int(avail_mb * 0.6) * 1024 * 1024  # bytes
 
-            JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x100
-            JOB_OBJECT_LIMIT_JOB_MEMORY = 0x200
-            mem_limit = int(avail_mb * 0.6) * 1024 * 1024  # bytes
+                ext = _ExtendedLimit()
+                ext.BasicLimitInformation.LimitFlags = (
+                    JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_JOB_MEMORY)
+                ext.ProcessMemoryLimit = mem_limit
+                ext.JobMemoryLimit = mem_limit
 
-            ext = _ExtendedLimit()
-            ext.BasicLimitInformation.LimitFlags = (
-                JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_JOB_MEMORY)
-            ext.ProcessMemoryLimit = mem_limit
-            ext.JobMemoryLimit = mem_limit
-            k32.SetInformationJobObject(
-                hJob, 9,  # JobObjectExtendedLimitInformation
-                ctypes.byref(ext), ctypes.sizeof(ext))
-
-            k32.AssignProcessToJobObject(hJob, hProc)
-            _job_handle = hJob  # 防 GC 释放
-
-            mem_gb = int(avail_mb * 0.6) / 1024
-            parts.append(f"内存硬上限={mem_gb:.0f}GB")
+                ok1 = k32.SetInformationJobObject(
+                    hJob, 9, ctypes.byref(ext), ctypes.sizeof(ext))
+                ok2 = k32.AssignProcessToJobObject(hJob, hProc) if ok1 else False
+                if ok1 and ok2:
+                    _job_handle = hJob
+                    mem_gb = int(avail_mb * 0.6) / 1024
+                    parts.append(f"内存硬上限={mem_gb:.0f}GB")
+                else:
+                    err = ctypes.get_last_error()
+                    step = "SetInformationJobObject" if not ok1 else "AssignProcessToJobObject"
+                    log.warning("%s失败 (GetLastError=%d)", step, err)
 
         except Exception as ex:
-            log.debug("系统限制 (Windows) 设置失败: %s", ex)
+            log.warning("Job Object 异常: %s", ex)
 
     elif sys.platform.startswith("linux"):
         try:
@@ -709,10 +730,16 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
                              total_ocr_images // 10,
                              max(0, (_avail_mb - 1024) // 400))
                 else:
-                    reason = ("图<50" if total_ocr_images < 50 else
-                              "非batch" if not batch_mode else
-                              "max_ocr<2" if MAX_OCR_THREADS < 2 else
-                              "内存不足")
+                    if sys.platform == "win32":
+                        reason = "Windows:spawn开销高"
+                    elif total_ocr_images < 50:
+                        reason = "图<50"
+                    elif not batch_mode:
+                        reason = "非batch"
+                    elif MAX_OCR_THREADS < 2:
+                        reason = "max_ocr<2"
+                    else:
+                        reason = "内存不足"
                     log.info("OCR 模式: %d 图 → ThreadPool %d 线程 (%s)",
                              total_ocr_images, MAX_OCR_THREADS, reason)
             if total_ocr_images > 0:
