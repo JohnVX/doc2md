@@ -62,6 +62,12 @@ def main():
     # 优先用真实图片目录 (命令行参数), 否则合成图
     import glob as _glob
     real_dirs = [a for a in sys.argv[1:] if os.path.isdir(a)]
+    # 展开: 传入的目录若含 *_assets 子目录, 自动收集 (支持传父目录)
+    expanded = []
+    for d in real_dirs:
+        subs = _glob.glob(os.path.join(d, "*_assets"))
+        expanded.extend(subs or [d])
+    real_dirs = expanded
     if not real_dirs:
         # 默认找 knowledge/original-doc/*_assets
         here = os.path.dirname(os.path.abspath(__file__))
