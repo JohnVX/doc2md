@@ -17,6 +17,18 @@ try:
 except ImportError:
     BUILD_TIME = "development"
 
+
+def _code_hash():
+    """doc2md 包目录所有 .py 文件的 SHA256 (排除 _build.py/__pycache__), 8 位."""
+    import hashlib
+    pkg = Path(__file__).parent
+    h = hashlib.sha256()
+    for p in sorted(pkg.rglob("*.py")):
+        if p.name == "_build.py" or "__pycache__" in p.parts:
+            continue
+        h.update(p.read_bytes())
+    return h.hexdigest()[:8]
+
 _DOC_EXTS = {".pptx", ".docx", ".xlsx", ".pdf", ".png", ".jpg", ".jpeg",
              ".md", ".txt", ".ppt", ".doc", ".xls",
              ".c", ".h", ".py", ".sh", ".cmake", ".yaml", ".yml"}
@@ -95,7 +107,7 @@ def _print_auto(items):
 def main(argv=None):
     """CLI 入口: 解析参数、自动检测、调用 pipeline."""
     _utf8_stdio()
-    print(f"doc2md (build: {BUILD_TIME})")
+    print(f"doc2md (build: {BUILD_TIME}, code: {_code_hash()})", flush=True)
     ap = argparse.ArgumentParser(
         prog="doc2md",
         description="资料转换处理器: 原始资料 -> knowledge/ (yaml 索引 + md 文本库 + stage2 交接)",
