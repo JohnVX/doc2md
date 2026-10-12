@@ -33,7 +33,7 @@
 ```
 
 1. **识别**：按文件**内容签名**判定格式，不靠扩展名（扩展名改错也能认对）。OOXML（docx/pptx/xlsx）都是 zip，靠 zip 内部结构区分；PDF/图片看魔数；文本类嗅探编码后按内容特征分 md/code/txt；旧二进制 office（.doc/.xls/.ppt）识别为 ole2。
-2. **解析 + OCR + 落盘**（两种模式，按可用内存自动选择）：解析器只提取文字/表格/图片，不做 OCR——图片存盘后插入 `<!-- ocr:type:dest -->` 占位，OCR 留到收尾时替换。解析器不加载 OCR 引擎，worker 进程轻量（避免多进程内存爆炸）。
+2. **解析 + OCR + 落盘**（两种模式，按可用内存自动选择）：解析器只提取文字/表格/图片，不做 OCR——图片存盘后插入 `<!-- ocr:type:dest -->` 占位，OCR 留到收尾时替换。解析器不加载 OCR 引擎，worker 进程轻量（避免多进程内存爆炸）。独立图片文件同理：blob 存 assets + 插占位，OCR 在 parent 进程执行。
    - **批量模式**（≥4GB 可用内存）：ProcessPool 并行解析全部文件 → shutdown pool（杀 worker）→ OCR + 去噪 + 分类 + 写 md。worker 与 OCR 不重叠，CPU 不叠加。
    - **流式模式**（<4GB）：解析一个 → 立即 OCR + 写出 + `gc.collect()` → 再解析下一个。低内存安全。
 3. **OCR**（平台自适应并行）：Linux batch+图≥50 用 ProcessPool（独立引擎，无 ONNX session 锁）；其余用 ThreadPool（共享引擎，ONNX `run()` 释放 GIL）。WMF/EMF 格式自动跳过（Linux 无解码器），defer 给 stage2。
@@ -59,7 +59,7 @@
 | pptx | 递归展开分组图形；逐 slide 标题/正文/表格/备注；内嵌图提取+OCR；非文本图形标记 |
 | xlsx | 每 sheet→md 表格；合并单元格展开；无缓存公式回退显示公式文本 |
 | pdf | 大纲注入章节标题；文字块按坐标排序；表格抽取(过滤伪表, 失败时降级为仅文字层)；扫描页渲染+OCR；内嵌图标记 |
-| png / jpeg … | OCR 文本块按序拼进 md；无文字/无引擎则 defer |
+| png / jpeg / gif / webp / tiff / bmp … | OCR 文本块按序拼进 md；无文字/无引擎则 defer |
 
 ### OCR
 

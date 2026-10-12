@@ -190,8 +190,10 @@ def detect(path: str):
         return {"format": "jpeg", "handler": "image", "ext": ext, "meta": {}}
     if head[:6] in (b"GIF87a", b"GIF89a"):
         return {"format": "gif", "handler": "image", "ext": ext, "meta": {}}
-    if head[:4] == b"RIFF" and open(path, "rb").read(12)[8:12] == b"WEBP":
-        return {"format": "webp", "handler": "image", "ext": ext, "meta": {}}
+    if head[:4] == b"RIFF":
+        with open(path, "rb") as f:
+            if f.read(12)[8:12] == b"WEBP":
+                return {"format": "webp", "handler": "image", "ext": ext, "meta": {}}
     if head[:4] in (b"II*\x00", b"MM\x00*"):
         return {"format": "tiff", "handler": "image", "ext": ext, "meta": {}}
     if head[:2] == b"BM":

@@ -693,11 +693,15 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
                         ocr_announced = True
                     if n_ocr > 0:
                         log.info("OCR: %s, %d 张图片", rel, n_ocr)
-                    status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
-                    if status == "write_fail":
+                    try:
+                        status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
+                        if status == "write_fail":
+                            errors += 1
+                        else:
+                            processed += 1
+                    except Exception as ex:
+                        log.error("收尾失败 %s: %s", rel, ex)
                         errors += 1
-                    else:
-                        processed += 1
                     del parsed
                     gc.collect()
         except KeyboardInterrupt:
@@ -761,11 +765,15 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
                     if rel not in parse_results:
                         continue
                     parsed, parse_time = parse_results.pop(rel)
-                    status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
-                    if status == "write_fail":
+                    try:
+                        status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
+                        if status == "write_fail":
+                            errors += 1
+                        else:
+                            processed += 1
+                    except Exception as ex:
+                        log.error("收尾失败 %s: %s", rel, ex)
                         errors += 1
-                    else:
-                        processed += 1
                     del parsed
                     gc.collect()
             except KeyboardInterrupt:
@@ -792,11 +800,15 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
         try:
             for item in finalize_items:
                 p, info, rel, sha, doc_id, parsed, _is_err = item
-                status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed)
-                if status == "write_fail":
+                try:
+                    status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed)
+                    if status == "write_fail":
+                        errors += 1
+                    else:
+                        processed += 1
+                except Exception as ex:
+                    log.error("收尾失败 %s: %s", rel, ex)
                     errors += 1
-                else:
-                    processed += 1
         except KeyboardInterrupt:
             interrupted = True
             log.warning("收到中断信号 (收尾阶段), 保存已处理部分并退出...")
