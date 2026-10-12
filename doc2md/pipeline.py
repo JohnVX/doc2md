@@ -42,6 +42,7 @@ OCR_PROCS = None  # None=自动; ProcessPool 进程数 (process 模式)
 
 _OCR_RE = re.compile(r'<!-- ocr:(img|scan):(\S+) -->')
 _ocr_pool = None  # ProcessPool for OCR (process 模式, 惰性创建, pipeline 结束后 shutdown)
+_ocr_text_cache = {}  # (doc_id, dest) -> OCR 文本 (跨文档全局预计算; thread 模式)
 _job_handle = None  # Windows Job Object handle (防止 GC 释放)
 
 
@@ -308,12 +309,52 @@ def _apply_system_limits(cpu_budget, cpus, avail_mb):
         log.info("系统限制: %s", ", ".join(parts))
 
 
+def _precompute_ocr(jobs, out):
+    """跨文档全局 OCR 预计算 (thread 模式): 一个池跑完所有文档的所有图片.
+
+    jobs: [(doc_id, dest, asset_path_str), ...] 全量 OCR 任务.
+    结果写入 _ocr_text_cache[(doc_id, dest)] = 文本或 None(无文字/跳过).
+
+    为何要全局池: 逐文档新建 ThreadPool 会让每个文档末尾出现并行度空洞
+    (文档图数 < 线程数时尾部跑不满), 文档越多空洞越明显. 全局池把 156 张图
+    摊平到同一组线程上, 消除空洞 (真实负载模拟: 12 线程 5.0x → 7.7x).
+
+    图片读取/decode 都在 worker 内完成 (与逐文档路径一致).
+    """
+    global _ocr_text_cache
+    if not jobs:
+        return
+    workers = min(MAX_OCR_THREADS, len(jobs))
+
+    def work(job):
+        doc_id, dest, asset_path = job
+        p = Path(asset_path)
+        if not p.exists():
+            return None
+        try:
+            blob = p.read_bytes()
+        except Exception:
+            return None
+        if not ocr.is_ocr_supported(blob):
+            return None
+        txt = ocr.ocr_image(blob)
+        return txt or None
+
+    log.info("OCR 预计算: %d 图, 全局 ThreadPool %d 线程", len(jobs), workers)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(work, jobs))
+    _ocr_text_cache = {(doc_id, dest): txt
+                       for (doc_id, dest, _), txt in zip(jobs, results)}
+
+
 def _post_ocr(body, out, doc_id, deferred_list):
     """收尾 OCR: 替换 <!-- ocr:type:dest --> 占位为 OCR 文本或 defer 标记.
 
-    两种并行模式 (按 OCR_MODE 选择):
+    三种并行模式:
+    - 预计算 (thread 模式, batch): 命中 _ocr_text_cache, 直接查表 (由
+      _precompute_ocr 用全局 ThreadPool 跑完). 无空洞.
     - process: ProcessPool, 各进程独立引擎, 无 session 锁. pool 由 run() 预创建.
-    - thread: ThreadPool, 共享单实例引擎, ONNX run() 释放 GIL.
+    - thread (流式/单文档回退): 本函数内建 ThreadPool.
     """
     adir = out / "original-doc" / f"{doc_id}_assets"
     matches = list(_OCR_RE.finditer(body))
@@ -326,28 +367,38 @@ def _post_ocr(body, out, doc_id, deferred_list):
             return f"```\n{txt}\n```"
         return defer(deferred_list, "scan-page" if ocr_type == "scan" else "image-ocr", 1)
 
-    def ocr_one(m):
-        ocr_type, dest = m.group(1), m.group(2)
-        asset_path = adir / dest
-        if not asset_path.exists():
-            return defer(deferred_list, "scan-page" if ocr_type == "scan" else "image-ocr", 1, "资产文件丢失")
-        blob = asset_path.read_bytes()
-        if not ocr.is_ocr_supported(blob):
-            return defer(deferred_list, "scan-page" if ocr_type == "scan" else "image-ocr", 1, "WMF/EMF格式不支持OCR")
-        return make_repl(m, ocr.ocr_image(blob))
-
-    # ProcessPool: 多进程并行
-    if OCR_MODE == "process" and _ocr_pool is not None and len(matches) >= 2:
-        paths = [str(adir / m.group(2)) for m in matches]
-        texts = list(_ocr_pool.map(_ocr_proc_worker, paths))
-        replacements = [make_repl(m, t) for m, t in zip(matches, texts)]
-
-    # ThreadPool: 单图直接 sub, 多图用 pool
-    elif len(matches) == 1:
-        return _OCR_RE.sub(ocr_one, body)
+    # 预计算命中: 直接查表 (全局池已跑完)
+    if _ocr_text_cache and OCR_MODE != "process":
+        replacements = []
+        for m in matches:
+            dest = m.group(2)
+            if (doc_id, dest) in _ocr_text_cache:
+                replacements.append(make_repl(m, _ocr_text_cache[(doc_id, dest)]))
+            else:
+                # 缓存缺该项 (图不存在/不支持) -> defer
+                replacements.append(make_repl(m, None))
     else:
-        with ThreadPoolExecutor(max_workers=min(MAX_OCR_THREADS, len(matches))) as pool:
-            replacements = list(pool.map(ocr_one, matches))
+        def ocr_one(m):
+            ocr_type, dest = m.group(1), m.group(2)
+            asset_path = adir / dest
+            if not asset_path.exists():
+                return defer(deferred_list, "scan-page" if ocr_type == "scan" else "image-ocr", 1, "资产文件丢失")
+            blob = asset_path.read_bytes()
+            if not ocr.is_ocr_supported(blob):
+                return defer(deferred_list, "scan-page" if ocr_type == "scan" else "image-ocr", 1, "WMF/EMF格式不支持OCR")
+            return make_repl(m, ocr.ocr_image(blob))
+
+        # ProcessPool: 多进程并行
+        if OCR_MODE == "process" and _ocr_pool is not None and len(matches) >= 2:
+            paths = [str(adir / m.group(2)) for m in matches]
+            texts = list(_ocr_pool.map(_ocr_proc_worker, paths))
+            replacements = [make_repl(m, t) for m, t in zip(matches, texts)]
+        # ThreadPool: 单图直接 sub, 多图用 pool
+        elif len(matches) == 1:
+            return _OCR_RE.sub(ocr_one, body)
+        else:
+            with ThreadPoolExecutor(max_workers=min(MAX_OCR_THREADS, len(matches))) as pool:
+                replacements = list(pool.map(ocr_one, matches))
 
     parts = []
     last_end = 0
@@ -553,6 +604,8 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
 
     # --- 资源嗅探: 自动调节并行度 (无人工配置) ---
     global MAX_WORKERS, MAX_OCR_THREADS, BATCH_MODE, OCR_MODE, OCR_PROCS, _ocr_pool
+    global _ocr_text_cache
+    _ocr_text_cache = {}  # 每轮清空 (防上次残留)
     _avail_mb = 0
     if MAX_WORKERS is None or MAX_OCR_THREADS is None or BATCH_MODE is None:
         dw, dt, cpus, _avail_mb, batch_mode = _detect_resources()
@@ -758,7 +811,25 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
                     max_workers=OCR_PROCS, initializer=_ocr_proc_init)
                 log.info("OCR ProcessPool 就绪 (%d worker, %.1fs)",
                          OCR_PROCS, time.time() - t_pool)
-            ocr_t0 = time.time()
+            # 全局预计算 OCR: 一个池跑完所有文档的所有图片 (消除逐文档并行度空洞)
+            if OCR_MODE == "thread" and total_ocr_images > 0:
+                jobs = []
+                for item in parse_items:
+                    p2, info2, rel2, sha2, doc_id2, ctx2, handler2 = item
+                    if rel2 not in parse_results:
+                        continue
+                    parsed2 = parse_results[rel2][0]
+                    for dest in _OCR_RE.findall(parsed2.get("body", "")):
+                        ap = out / "original-doc" / f"{doc_id2}_assets" / dest[1]
+                        jobs.append((doc_id2, dest[1], str(ap)))
+                ocr_t0 = time.time()
+                try:
+                    _precompute_ocr(jobs, out)
+                except KeyboardInterrupt:
+                    interrupted = True
+                    log.warning("收到中断信号 (OCR 预计算阶段), 保存已处理部分并退出...")
+            else:
+                ocr_t0 = time.time()
             try:
                 for item in parse_items:
                     p, info, rel, sha, doc_id, ctx, handler = item
