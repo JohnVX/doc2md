@@ -128,9 +128,8 @@ doc2md/
 
 **ThreadPool 模式的关键优化——跨文档全局池**：batch 模式下不再逐文档新建
 ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文档的全部
-图片（`_precompute_ocr`），结果缓存后各文档查表写回。消除了逐文档池在文档
-边界处的并行度空洞（文档图数 < 线程数时尾部跑不满）。实测 Linux 2 核 155 图
-150.3s → 135.1s（+10%），空洞随核数放大。
+图片（`_precompute_ocr`），结果缓存后各文档查表写回，消除逐文档池的并行度空洞
+（原理与数据见 **第十节·性能**）。
 
 ### 4.4 两层资源限制：系统硬上限 + 应用优化
 
@@ -155,24 +154,15 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 并 monkey-patch `onnxruntime.InferenceSession` 兜底，强制覆盖调用方传入的
 `sess_options`。默认值 1，可用环境变量 `DOC2MD_OCR_INTRA_OP` 覆盖。
 
-**理由**：不限制时，每个 ONNX 推理会起 `intra_op_num_threads` 个线程，默认 = 全部核心。
-ThreadPool 模式下 12 线程 × 全核 16 = 192 线程抢 16 核，**严重超订**，并行反而
-退化为准串行。实测（Windows 16 核可用，156 真实图）：
+**理由**：不限制时，每个 ONNX 推理默认起全部核心数个线程，与 ThreadPool 相乘
+造成**线程超订**（12 线程 × 全核 16 = 192 线程抢 16 核），并行反退化为准串行。
 
-| intra_op | 12 线程 OCR 耗时 |
-|---|---|
-| 全核（不限制） | ~240s（接近串行）|
-| 1 | **99.6s** |
+**关键坑**：rapidocr 的 `OrtInferSession` 总是**自己传入 `sess_options`**，因此只在
+「缺失时补默认」的 monkey-patch 会被绕过，`intra_op` 实际仍为 0（全核）。修复必须
+**原地覆盖**调用方传入的 `sess_options`，或在构造 `RapidOCR` 时直接传
+`intra_op_num_threads`（推荐）。`OMP_NUM_THREADS=1` 在 Windows 上无效，必须改 session 选项。
 
-**关键坑**：rapidocr 的 `OrtInferSession` 总是**自己传入 `sess_options`**（其 config
-`intra_op_num_threads=-1` → 不设置该值 → ORT 默认全核）。因此 monkey-patch 必须
-**原地覆盖**调用方传入的 `sess_options`，而不只是补默认值——否则被绕过，`intra_op`
-实际仍为 0（全核）。更可靠的方式是构造 `RapidOCR` 时直接传 `intra_op_num_threads`
-（rapidocr 的 `UpdateParameters` 会读该 config 并写入自己的 `sess_options`），
-monkey-patch 仅作双保险。`OMP_NUM_THREADS=1` 在 Windows 上无效，必须改 session 选项。
-
-**权衡**：`intra_op=4` 在部分测量中略快（真实图 155 张 78.9s→60.0s），但该差异在
-测量噪声范围内，且 12×4=48 线程在 16 核上是 3x 超订，故默认保守取 1，环境变量可调优。
+> 完整原理、扫描数据与诊断过程见 **第十节·性能**。
 
 ### 4.7 Batch vs Streaming，按内存自动选择
 
@@ -345,7 +335,68 @@ keywords:                     # 关键词 -> 类目（文件名+正文命中最�
 
 ---
 
-## 十、依赖与跨平台
+## 十、性能：结论与决策
+
+功能完成后对 OCR 并行做了系统诊断。以下为**结论性论断与决策**，原理随附。
+
+### 10.1 结论：OCR 并行瓶颈是线程超订，不是 GIL
+
+**论断**：Windows 28 核（可用 16 核）处理 156 张真实图，最初 OCR 仅 ~1.25x 加速（近串行）。
+真因**不是** GIL，而是 **ONNX 每次推理默认用全部核心**与 ThreadPool 相乘导致的**线程超订**。
+
+**原理**：ONNX `intra_op_num_threads` 未设时 = 全核。ThreadPool 12 线程 × 全核 16 = 
+**192 线程抢 16 核**，上下文切换吞掉全部收益。将单次推理限制为 1 线程后，
+12 × 1 = 12，干净匹配核心数。
+
+**为何不是 GIL**：实测 ONNX `session.run` 占单图 94-97% 且确实释放 GIL；
+Python 胶水（裁剪/预处理/解码）仅占 **0.1%**。所谓「需 C 扩展绕开 GIL」的方案被证伪。
+
+### 10.2 决策：限制 `intra_op`，但保留调优口
+
+**决策**：构造 OCR 引擎时限制 `intra_op=1`（`RapidOCR(intra_op_num_threads=1)`），
+monkey-patch `InferenceSession` 兜底；默认 1，环境变量 `DOC2MD_OCR_INTRA_OP` 可调。
+
+**原理（关键坑）**：rapidocr 的 `OrtInferSession` **总是自己传入 `sess_options`**，
+导致「缺失时才补默认」的 patch 被绕过，`intra_op` 实际仍为 0（全核）。修复必须
+**原地覆盖**调用方传入的 `sess_options`，或在构造时直接传 `intra_op_num_threads`（推荐，
+见 `doc2md/ocr.py`）。`OMP_NUM_THREADS=1` 在 Windows 无效，必须改 session 选项。
+
+**为何不取更优的 4**：扫描显示 `intra_op` 1/2/4 在噪声范围内（真实 155 图：全核 148.6s、
+1 为 78.9s、4 为 60.0s），但 4 = 12×4=48 线程/16 核（3x 超订），且测量抖动达 2-3x，
+故保守取 **1**。**教训：合成图结论不可信（曾误导出「全核最佳」），必须以真实负载为准。**
+
+### 10.3 决策：跨文档全局 ThreadPool
+
+**决策**：batch + thread 模式下，finalize 前用**一个全局池**跑完所有文档的全部图片
+（`_precompute_ocr`），结果缓存后各文档查表写回；不再逐文档建池。
+
+**原理**：逐文档建池，当文档图数 < 线程数时**尾部跑不满**（并行度空洞），且单张超重图
+（实测有 19.7s 的图）会阻塞该文档尾部。全局池将所有图摊平到同一组线程，消除空洞。
+**收益随核数放大**（空洞在低核机不明显，高核机显著）。
+
+### 10.4 结论：瓶颈短板是 det（已探明，主动收手）
+
+**论断**：单图耗时拆解——**rec（识别）70% / det（检测）29% / Python 胶水 0.1%**。
+rec session 单独并发可达 **8.73x**，但 det-only 仅 ~2.6x，完整链路 ≈ det 的 2.6x。
+即 **det 是木桶短板**，拖累占 70% 的 rec 无法发挥。
+
+**决策：不再继续优化。** 理由：det 仅占 29%，即使完全消除其开销，整体上限约 **+29%**，
+**非数量级收益**；且 det 受限可能来自整张大图的内存带宽（**硬件层面**），非软件可解。
+
+### 10.5 效果
+
+仅动线程配置与调度、**未改 OCR 算法、输出逐字节不变**：
+
+| | OCR 耗时 | 端到端 |
+|---|---|---|
+| 原始 | 250.6s | 256s |
+| 优化后 | **91.5s** | **97s** |
+
+**端到端约 2.6x**（Windows 156 真实图）。
+
+---
+
+## 十一、依赖与跨平台
 
 ```bash
 pip install -r requirements.txt
@@ -368,7 +419,7 @@ pip install -r requirements.txt
 
 ---
 
-## 十一、测试
+## 十二、测试
 
 测试套位于 `tests/`，**不依赖 pytest 或任何额外库**，所有测试输入由代码现场生成，零外部 fixture 依赖、hermetic 自清理。
 
@@ -381,7 +432,7 @@ python tests/run_all.py -v        # 详细（含失败堆栈）
 
 ---
 
-## 十二、限制 / 留给第二阶段
+## 十三、限制 / 留给第二阶段
 
 stage 1 原则：**确定性工作总是有益、对后续无害**。
 
@@ -399,7 +450,7 @@ stage 1 原则：**确定性工作总是有益、对后续无害**。
 
 ---
 
-## 十三、快速验证
+## 十四、快速验证
 
 ```bash
 pip install -e .                       # 注册 doc2md 命令
