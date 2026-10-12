@@ -538,6 +538,9 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
     # 压掉 pdfminer/PIL 的内部噪声 (FontBBox 等), 只留 ERROR
     for noisy in ("pdfminer", "pdfminer.six", "PIL"):
         logging.getLogger(noisy).setLevel(logging.ERROR)
+    # 压掉 openpyxl 的 UserWarning (Unknown extension / Conditional Formatting)
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
     # --- 资源嗅探: 自动调节并行度 (无人工配置) ---
     global MAX_WORKERS, MAX_OCR_THREADS, BATCH_MODE, OCR_MODE, OCR_PROCS, _ocr_pool
