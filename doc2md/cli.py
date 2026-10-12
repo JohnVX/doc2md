@@ -12,6 +12,11 @@ from . import pipeline
 
 log = logging.getLogger("cli")
 
+try:
+    from ._build import BUILD_TIME
+except ImportError:
+    BUILD_TIME = "development"
+
 _DOC_EXTS = {".pptx", ".docx", ".xlsx", ".pdf", ".png", ".jpg", ".jpeg",
              ".md", ".txt", ".ppt", ".doc", ".xls",
              ".c", ".h", ".py", ".sh", ".cmake", ".yaml", ".yml"}
@@ -90,6 +95,7 @@ def _print_auto(items):
 def main(argv=None):
     """CLI 入口: 解析参数、自动检测、调用 pipeline."""
     _utf8_stdio()
+    print(f"doc2md (build: {BUILD_TIME})")
     ap = argparse.ArgumentParser(
         prog="doc2md",
         description="资料转换处理器: 原始资料 -> knowledge/ (yaml 索引 + md 文本库 + stage2 交接)",
