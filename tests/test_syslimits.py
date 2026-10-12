@@ -1,7 +1,7 @@
-"""系统级资源限制测试: CPU 亲和性 + 进程优先级 + 内存硬上限.
+"""系统级资源限制测试: CPU 亲和性 + 内存硬上限.
 
-Windows: SetProcessAffinityMask + Job Object + SetPriorityClass.
-Linux: sched_setaffinity + nice + RLIMIT_AS.
+Windows: SetProcessAffinityMask + Job Object.
+Linux: sched_setaffinity + RLIMIT_AS.
 """
 import os
 import resource
@@ -15,7 +15,7 @@ CASES = []
 
 
 def test_apply_system_limits_linux():
-    """Linux: 设置 CPU 亲和性 + nice + RLIMIT_AS, 验证生效."""
+    """Linux: 设置 CPU 亲和性 + RLIMIT_AS, 验证生效."""
     if not sys.platform.startswith("linux"):
         raise SkipTest("仅 Linux")
     old_aff = os.sched_getaffinity(0)
@@ -31,21 +31,19 @@ def test_apply_system_limits_linux():
     finally:
         os.sched_setaffinity(0, old_aff)
         resource.setrlimit(resource.RLIMIT_AS, old_rlim)
-        try:
-            os.nice(-10)
-        except PermissionError:
-            pass
 
 
 def test_apply_system_limits_idempotent():
     """重复调用不报错."""
     if not sys.platform.startswith("linux"):
         raise SkipTest("仅 Linux")
+    old_aff = os.sched_getaffinity(0)
     old_rlim = resource.getrlimit(resource.RLIMIT_AS)
     try:
         pipeline._apply_system_limits(2, os.cpu_count() or 2, 4096)
         pipeline._apply_system_limits(2, os.cpu_count() or 2, 8192)
     finally:
+        os.sched_setaffinity(0, old_aff)
         resource.setrlimit(resource.RLIMIT_AS, old_rlim)
 
 

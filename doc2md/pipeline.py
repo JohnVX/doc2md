@@ -50,6 +50,7 @@ def _ocr_mode_decision(batch_mode, max_ocr, avail_mb, total_images):
 
     ProcessPool: 各进程独立 GIL+引擎, 无 ONNX session 锁, 预处理+推理真并行.
     条件 (全部满足):
+      - Linux (Windows spawn 开销过高, 实测慢 3-5 倍)
       - batch 模式
       - 图数 ≥ 50 (启动开销需摊薄, 每 worker ≥10 图)
       - max_ocr ≥ 2 (单进程无并行收益)
@@ -57,6 +58,8 @@ def _ocr_mode_decision(batch_mode, max_ocr, avail_mb, total_images):
     worker 数 = min(max_ocr, total_images//10, (avail_mb-1024)//400)
     返回 (mode, workers).
     """
+    if sys.platform == "win32":
+        return "thread", max_ocr  # Windows spawn 开销过高, ThreadPool 更快
     OCR_THRESHOLD = 50
     IMAGES_PER_WORKER = 10
     if not batch_mode or total_images < OCR_THRESHOLD or max_ocr < 2:
@@ -187,12 +190,10 @@ def _apply_system_limits(cpu_budget, cpus, avail_mb):
     Windows:
       1. CPU 亲和性: SetProcessAffinityMask → 只用 cpu_budget 个核心.
          子进程继承掩码, ONNX/OpenCV 内部线程也无法绕过.
-      2. 进程优先级: BELOW_NORMAL → 系统忙时自动让出 CPU.
-      3. Job Object: 内存硬上限 (整个进程树 commit 总量, 超限则分配失败).
+      2. Job Object: 内存硬上限 (整个进程树 commit 总量, 超限则分配失败).
     Linux:
       1. CPU 亲和性: sched_setaffinity.
-      2. nice +10.
-      3. RLIMIT_AS: 单进程虚拟地址空间上限 (防泄漏, 非 tree-wide; tree-wide 需 cgroups/root).
+      2. RLIMIT_AS: 单进程虚拟地址空间上限 (防泄漏, 非 tree-wide; tree-wide 需 cgroups/root).
     """
     global _job_handle
     parts = []
@@ -209,12 +210,7 @@ def _apply_system_limits(cpu_budget, cpus, avail_mb):
             k32.SetProcessAffinityMask(hProc, mask)
             parts.append(f"CPU亲和={cpu_budget}/{cpus}核")
 
-            # 2. 进程优先级: BELOW_NORMAL
-            BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
-            k32.SetPriorityClass(hProc, BELOW_NORMAL_PRIORITY_CLASS)
-            parts.append("优先级=BELOW_NORMAL")
-
-            # 3. Job Object: 内存硬上限 (整个进程树)
+            # 2. Job Object: 内存硬上限 (整个进程树)
             hJob = k32.CreateJobObjectW(None, None)
 
             class _IO_COUNTERS(ctypes.Structure):
@@ -276,11 +272,6 @@ def _apply_system_limits(cpu_budget, cpus, avail_mb):
         try:
             os.sched_setaffinity(0, set(range(cpu_budget)))
             parts.append(f"CPU亲和={cpu_budget}/{cpus}核")
-        except Exception:
-            pass
-        try:
-            os.nice(10)
-            parts.append("nice=+10")
         except Exception:
             pass
         try:
@@ -538,9 +529,6 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
     # 压掉 pdfminer/PIL 的内部噪声 (FontBBox 等), 只留 ERROR
     for noisy in ("pdfminer", "pdfminer.six", "PIL"):
         logging.getLogger(noisy).setLevel(logging.ERROR)
-    # 压掉 openpyxl 的 UserWarning (Unknown extension / Conditional Formatting)
-    import warnings
-    warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
     # --- 资源嗅探: 自动调节并行度 (无人工配置) ---
     global MAX_WORKERS, MAX_OCR_THREADS, BATCH_MODE, OCR_MODE, OCR_PROCS, _ocr_pool

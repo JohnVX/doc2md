@@ -1,8 +1,11 @@
 """OCR 模式决策测试: ProcessPool vs ThreadPool, 基于图数+硬件.
 
-ProcessPool: batch + 图数≥50 + 内存够每进程 400MB.
+ProcessPool: Linux + batch + 图数≥50 + 内存够每进程 400MB.
+Windows: 始终 ThreadPool (spawn 开销过高, 实测慢 3-5 倍).
 worker 数 = min(CPU预算, 图数//10), 确保每 worker ≥10 图摊薄启动.
 """
+import sys
+
 from tests._runner import assert_eq, assert_true
 
 from doc2md import pipeline
@@ -17,7 +20,7 @@ def test_few_images_thread():
 
 
 def test_threshold_50_process():
-    """50 图, batch, 大内存 → ProcessPool."""
+    """50 图, batch, 大内存 → ProcessPool (Linux)."""
     mode, n = pipeline._ocr_mode_decision(True, 12, 51200, 50)
     assert_eq("process", mode)
     assert_eq(5, n)  # 50//10=5
@@ -69,9 +72,21 @@ def test_boundary_49_thread():
 
 
 def test_boundary_50_process():
-    """50 图 → ProcessPool (刚好够)."""
+    """50 图 → ProcessPool (刚好够, Linux)."""
     mode, n = pipeline._ocr_mode_decision(True, 12, 51200, 50)
     assert_eq("process", mode)
+
+
+def test_windows_always_thread():
+    """Windows: 无论图数多少, 都用 ThreadPool (spawn 开销过高)."""
+    old = sys.platform
+    sys.platform = "win32"
+    try:
+        mode, n = pipeline._ocr_mode_decision(True, 12, 51200, 500)
+        assert_eq("thread", mode)
+        assert_eq(12, n)
+    finally:
+        sys.platform = old
 
 
 CASES.extend([
@@ -85,4 +100,5 @@ CASES.extend([
     ("ocr_mode_mem_insufficient", test_mem_insufficient_thread),
     ("ocr_mode_boundary_49", test_boundary_49_thread),
     ("ocr_mode_boundary_50", test_boundary_50_process),
+    ("ocr_mode_windows_always_thread", test_windows_always_thread),
 ])
