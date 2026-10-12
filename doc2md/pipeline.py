@@ -9,7 +9,8 @@
     worker 数 = min(CPU预算, 图数//10), 每进程 ~400MB.
   - ThreadPool (其余): 共享单实例引擎, ONNX run() 释放 GIL 提供部分并行.
 解析用 ProcessPool 而非 ThreadPool: fitz.Page.find_tables() 在 C 层有全局状态, 线程不安全.
-资源上限 ~60%: CPU 预算 = int(cpus*0.6), OCR 拿 3/4 (batch) 或满额 (streaming), worker 拿 1/4.
+系统级限制 (硬上限, 子进程继承): CPU亲和性→60%核心, Win:Job Object内存/Linux:RLIMIT_AS.
+应用级配置 (优化): 读亲和性后实际核数, 3/4 给 OCR (batch), 1/4 给 worker.
 parser 只存图+插占位 <!-- ocr:type:dest -->, _post_ocr 替换占位为 OCR 文本或 defer 标记.
 parser 返回的 deferred (结构化 stage2 待处理项) 经 aggregate_deferred 合并后
 写入 front-matter / manifest / catalog, 供 stage2 agent 编程查询.

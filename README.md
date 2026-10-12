@@ -42,7 +42,12 @@
 6. **入目录**：更新 `catalog.yaml` + `handoff.yaml`（每次从全量 manifest 重建）。
 7. **增量清理**：哈希未变则跳过；源文件删除则清理其 md/原件/条目；格式变为不支持则转 defer（见下）。
 
-**为什么解析用 ProcessPool、OCR 用 ThreadPool？** 解析阶段 fitz（PDF 表格检测）在 C 层有全局状态，线程不安全，必须进程隔离。OCR 阶段 rapidocr 底层 ONNX Runtime 的 `run()` 线程安全，用线程即可——共享同一个模型实例，零额外内存。批量模式先解析完再 OCR（不重叠），流式模式解析一个立即 OCR+写出+`gc.collect()`（低内存安全）。资源上限 ~60%：CPU 预算 = `int(cpus*0.6)`，OCR 拿 3/4（批量）或满额（流式），worker 拿 1/4。并行度按硬件自动嗅探，无需人工配置。
+**为什么解析用 ProcessPool、OCR 用 ThreadPool？** 解析阶段 fitz（PDF 表格检测）在 C 层有全局状态，线程不安全，必须进程隔离。OCR 阶段 rapidocr 底层 ONNX Runtime 的 `run()` 线程安全，用线程即可——共享同一个模型实例，零额外内存。批量模式先解析完再 OCR（不重叠），流式模式解析一个立即 OCR+写出+`gc.collect()`（低内存安全）。并行度按硬件自动嗅探，无需人工配置。
+
+**系统级资源限制（CPU + 内存，子进程继承）：**
+- **Windows**：CPU 亲和性（`SetProcessAffinityMask` → 60% 核心）+ Job Object（内存硬上限）+ BELOW_NORMAL 优先级。子进程继承亲和性与 Job Object，ONNX/OpenCV 内部线程也无法绕过。
+- **Linux**：CPU 亲和性（`sched_setaffinity` → 60% 核心）+ `RLIMIT_AS`（单进程虚拟地址空间上限）+ `nice +10`。
+- **两层互补**：系统级是硬上限（安全网，防 CPU 100%），应用级是优化（读亲和性后实际核数，决定 spawn 几个进程，避免上下文切换）。
 
 ### 各格式能力
 
