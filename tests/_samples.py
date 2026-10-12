@@ -67,6 +67,70 @@ def gen_txt(path):
         f.write("一段纯文本样本。\n")
 
 
+def gen_pptx_rich(path):
+    """PPTX with title, body, table, notes — covers real slide content."""
+    from pptx import Presentation
+    from pptx.util import Inches
+    prs = Presentation()
+    # Slide 1: Title + body
+    slide = prs.slides.add_slide(prs.slide_layouts[1])
+    slide.shapes.title.text = "幻灯片标题"
+    slide.placeholders[1].text = "正文内容段落"
+    # Slide 2: Table
+    slide2 = prs.slides.add_slide(prs.slide_layouts[1])
+    slide2.shapes.title.text = "表格幻灯片"
+    tbl = slide2.shapes.add_table(2, 2, Inches(1), Inches(2), Inches(4), Inches(1)).table
+    tbl.cell(0, 0).text = "表头A"
+    tbl.cell(0, 1).text = "表头B"
+    tbl.cell(1, 0).text = "数据1"
+    tbl.cell(1, 1).text = "数据2"
+    # Notes on slide 1
+    slide.notes_slide.notes_text_frame.text = "这是备注内容"
+    prs.save(path)
+
+
+def gen_pdf_encrypted(path):
+    """Encrypted PDF (user password) — should trigger `encrypted` defer."""
+    import pymupdf as fitz
+    doc = fitz.open()
+    doc.new_page().insert_text((50, 72), "Secret content")
+    doc.save(path, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="pass123")
+    doc.close()
+
+
+def gen_pptx_with_image(path, img_path=None):
+    """PPTX with a slide image — for OCR/defer testing."""
+    from pptx import Presentation
+    from pptx.util import Inches
+    import os
+    if img_path is None:
+        img_path = os.path.join(os.path.dirname(path), "_tmp_img.png")
+        gen_text_png(img_path)
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[1])
+    slide.shapes.title.text = "带图幻灯片"
+    slide.shapes.add_picture(img_path, Inches(1), Inches(2), Inches(4), Inches(2))
+    prs.save(path)
+
+
+def gen_xlsx_multisheet(path):
+    """Multi-sheet xlsx — verify all sheets extracted."""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "汇总"
+    ws1["A1"] = "汇总数据"
+    ws2 = wb.create_sheet("明细")
+    ws2["A1"] = "明细数据"
+    wb.save(path)
+
+
+def gen_gbk_txt(path):
+    """GBK-encoded Chinese text — verify encoding sniffing + correct decode."""
+    with open(path, "wb") as f:
+        f.write("中文GBK编码的纯文本。".encode("gbk"))
+
+
 def _load_font(size):
     """跨平台尝试加载一个 TTF, 找不到用 PIL 默认."""
     from PIL import ImageFont
