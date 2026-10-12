@@ -68,16 +68,15 @@ def _intra_op_single():
 
 
 # OCR 单个推理 session 的 intra_op 线程数.
-# 实测 (Windows 28核, 真实155图, 12 ThreadPool 线程):
-#   intra_op=1 -> 78.9s; 2 -> 66.3s; 4 -> 60.0s (最优); 全核(0) -> 148.6s (灾难)
-# 原因: 每 session 用全部核心与其它并发 session 争抢内存带宽/缓存 -> 超订;
-# 但过度限制到 1 又浪费了单次大图卷积的并行度. 4 是平衡点.
-# 可用环境变量 DOC2MD_OCR_INTRA_OP 覆盖 (调试/调优).
+# 实测 (Windows 28核, 真实155图, 12 ThreadPool 线程) 对比:
+#   intra_op=1 -> 78.9s; 2 -> 66.3s; 4 -> 60.0s; 全核(0) -> 148.6s (灾难)
+# 全核确认最差 (超订); 但 1 与 4 的差异在测量噪声范围内, 且真实端到端
+# 收益不大 (~15-20s), 故保守取 1. 环境变量 DOC2MD_OCR_INTRA_OP 可调优.
 def _intra_op_value():
     try:
-        v = int(os.environ.get("DOC2MD_OCR_INTRA_OP", "4"))
+        v = int(os.environ.get("DOC2MD_OCR_INTRA_OP", "1"))
     except ValueError:
-        v = 4
+        v = 1
     return v
 
 

@@ -125,7 +125,7 @@ CASES.append(("ocr_proc_mode_e2e", test_ocr_proc_mode_e2e))
 
 
 def test_intra_op_forced_single():
-    """回归: intra_op 应被强制为配置值 (默认 4), 即使调用方自带 sess_options.
+    """回归: intra_op 应被强制为配置值 (默认 1), 即使调用方自带 sess_options.
 
     真实 bug: rapidocr 的 OrtInferSession 总是自己传 sess_options
     (其 config intra_op_num_threads=-1 → 不设置 → ORT 默认=全部核心).
@@ -165,7 +165,7 @@ def test_intra_op_forced_single():
             patched("nonexistent.onnx", sess_options=caller_opts)
         except Exception:
             pass
-        # 关键断言: 调用方传入的 opts 对象被原地改为配置值 (默认 4)
+        # 关键断言: 调用方传入的 opts 对象被原地改为配置值 (默认 1)
         expect = ocr._intra_op_value()
         assert_eq(caller_opts.intra_op_num_threads, expect,
                   "传入的 sess_options.intra_op 应被强制为配置值")
@@ -179,10 +179,10 @@ CASES.append(("intra_op_forced_single", test_intra_op_forced_single))
 
 
 def test_new_engine_forces_single_thread():
-    """回归: _new_engine 构造的引擎 session intra_op 应为配置值 (默认 4).
+    """回归: _new_engine 构造的引擎 session intra_op 应为配置值 (默认 1).
 
     首选路径是 RapidOCR(intra_op_num_threads=N), 不依赖 monkey-patch.
-    默认 4 (实测 12 线程下最优); 环境变量 DOC2MD_OCR_INTRA_OP 可覆盖.
+    默认 1 (保守; 实测 4 略快但差异在噪声内); 环境变量 DOC2MD_OCR_INTRA_OP 可覆盖.
     """
     require_ocr()
     expect = ocr._intra_op_value()
@@ -201,14 +201,14 @@ def test_new_engine_forces_single_thread():
 
 
 def test_intra_op_value_default_and_override():
-    """_intra_op_value: 默认返回 4, 环境变量可覆盖 (防超订不取全核)."""
+    """_intra_op_value: 默认返回 1 (保守), 环境变量可覆盖 (防超订不取全核)."""
     old = os.environ.pop("DOC2MD_OCR_INTRA_OP", None)
     try:
-        assert_eq(4, ocr._intra_op_value(), "默认应为 4")
-        os.environ["DOC2MD_OCR_INTRA_OP"] = "2"
-        assert_eq(2, ocr._intra_op_value(), "环境变量应覆盖")
+        assert_eq(1, ocr._intra_op_value(), "默认应为 1")
+        os.environ["DOC2MD_OCR_INTRA_OP"] = "4"
+        assert_eq(4, ocr._intra_op_value(), "环境变量应覆盖")
         os.environ["DOC2MD_OCR_INTRA_OP"] = "notint"
-        assert_eq(4, ocr._intra_op_value(), "非法值应回退默认")
+        assert_eq(1, ocr._intra_op_value(), "非法值应回退默认")
     finally:
         os.environ.pop("DOC2MD_OCR_INTRA_OP", None)
         if old is not None:
