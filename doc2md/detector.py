@@ -164,16 +164,16 @@ def detect(path: str):
     # 二进制: OOXML (zip)
     if head[:2] == b"PK" and head[2:4] in (b"\x03\x04", b"\x05\x06", b"\x07\x08"):
         try:
-            z = zipfile.ZipFile(path)
-            names = set(z.namelist())
-            if "word/document.xml" in names:
-                return {"format": "docx", "handler": "docx", "ext": ext, "meta": {}}
-            if any(n.startswith("xl/") and n.endswith("workbook.xml") for n in names) or "xl/workbook.xml" in names:
-                return {"format": "xlsx", "handler": "xlsx", "ext": ext, "meta": {}}
-            if "ppt/presentation.xml" in names:
-                return {"format": "pptx", "handler": "pptx", "ext": ext, "meta": {}}
-            return {"format": "zip", "handler": None, "ext": ext,
-                    "meta": {"reason": "zip but not office OOXML"}}
+            with zipfile.ZipFile(path) as z:
+                names = set(z.namelist())
+                if "word/document.xml" in names:
+                    return {"format": "docx", "handler": "docx", "ext": ext, "meta": {}}
+                if any(n.startswith("xl/") and n.endswith("workbook.xml") for n in names) or "xl/workbook.xml" in names:
+                    return {"format": "xlsx", "handler": "xlsx", "ext": ext, "meta": {}}
+                if "ppt/presentation.xml" in names:
+                    return {"format": "pptx", "handler": "pptx", "ext": ext, "meta": {}}
+                return {"format": "zip", "handler": None, "ext": ext,
+                        "meta": {"reason": "zip but not office OOXML"}}
         except zipfile.BadZipFile:
             return {"format": "zip-corrupt", "handler": None, "ext": ext, "meta": {}}
     # 二进制: 旧版 OLE2 (doc/xls/ppt)
