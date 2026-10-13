@@ -4,7 +4,8 @@ rapidocr 未安装时跳过(OCR 为可选增强, 不应让测试失败)."""
 import os
 
 from tests._runner import (HAS_RAPIDOCR, assert_contains_any, assert_eq,
-                            assert_true, cleanup, make_tmp_input, require_ocr)
+                            assert_true, cleanup, make_tmp_input, require_ocr,
+                            skip)
 
 from doc2md import ocr
 
@@ -189,15 +190,11 @@ def test_new_engine_forces_single_thread():
     try:
         eng = ocr._new_engine()
     except Exception:
-        return  # 引擎不可用则跳过
-    try:
-        so = eng.text_det.infer.session.get_session_options()
-        assert_eq(expect, so.intra_op_num_threads,
-                  "det session intra_op 应为配置值")
-        assert_eq(1, so.inter_op_num_threads,
-                  "det session inter_op 应为 1")
-    except Exception:
-        pass
+        skip("OCR 引擎不可用")  # 引擎不可用则显式 SKIP (不静默 PASS)
+    # 断言放在 try 之外, 避免被 except 吞掉导致"假通过"
+    so = eng.text_det.infer.session.get_session_options()
+    assert_eq(expect, so.intra_op_num_threads, "det session intra_op 应为配置值")
+    assert_eq(1, so.inter_op_num_threads, "det session inter_op 应为 1")
 
 
 def test_intra_op_value_default_and_override():

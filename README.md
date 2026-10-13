@@ -85,7 +85,7 @@ doc2md/
 │   ├── _common.py    共享: md 表格 / defer 标记 / 聚合
 │   ├── docx.py       Word: 段落/表格/列表/内嵌图/公式图表检测
 │   ├── pptx.py       PowerPoint: 分组递归/slide/表格/备注/图片
-│   ├── pdf.py        PDF: 大纲/文字块排序/表格/扫描页渲染
+│   ├── pdf.py        PDF: 大纲/文字块排序/表格/跨页样板剔除/扫描页渲染
 │   ├── xlsx.py       Excel: 多 sheet/合并展开/公式回退
 │   ├── image.py      图片: 存图+OCR占位 (与其他 parser 一致)
 │   ├── md.py         Markdown: pass-through + 内嵌图跟进
@@ -473,7 +473,7 @@ python tests/run_all.py          # 退出码 0=全过，1=有失败
 python tests/run_all.py -v        # 详细（含失败堆栈）
 ```
 
-145 个用例，覆盖：格式识别、各格式解析正确性、OCR（引擎失败缓存/正向出字/ProcessPool/WMF-EMF 跳过/噪音过滤）、去噪、分类优先级、路径校验、损坏文件、中断保存、增量全链路、deferred 结构化、零参数 CLI、batch 模式输出一致性、加密 PDF defer、PPTX 内容（标题/正文/表格/备注）、特殊文件名、多 sheet xlsx、GBK 编码、代码文件围栏、verbose 模式、收尾异常不中断、并行确定性、系统资源限制、产物质量回退（表格转义/占位标题/OCR 噪音/表格摘要）。
+用例覆盖：格式识别、各格式解析正确性、OCR（引擎失败缓存/正向出字/ProcessPool/WMF-EMF 跳过）、去噪、分类优先级、路径校验、损坏文件、中断保存、增量全链路、deferred 结构化、零参数 CLI、batch 模式输出一致性、加密 PDF defer、PPTX 内容（标题/正文/表格/备注）、特殊文件名、多 sheet xlsx、GBK 编码、代码文件围栏、verbose 模式、收尾异常不中断、并行确定性、系统资源限制、产物质量回退（表格转义/占位标题/表格摘要/PDF 跨页样板剔除/PPTX 箭头不计 defer）。
 
 ---
 
@@ -495,16 +495,19 @@ stage 1 原则：**确定性工作总是有益、对后续无害**。
 
 ### 产物质量修复（真实资料检查中发现并修复）
 
-对真实产物做逐项审查后修复的 4 个确定性缺陷（均不损精度、不影响性能）：
+对真实产物做逐项审查（含逐张读图核对）后修复的确定性缺陷（均不损精度、不影响性能）：
 
 | 缺陷 | 根因 | 修法 |
 |---|---|---|
 | PPT 表格行被拆断 | 单元格内换行为 `\x0b`(VT)，而 `md_table`/`_render_table` 只转义 `\n`；`clean_text` 用 `splitlines()` 又把 `\x0b` 当行界 | 转义覆盖 `\x0b/\x0c`；`clean_text` 改 `split("\n")`；转义统一在 `md_table.esc` 一处（顺带消除 `\|` 双重转义） |
 | PPT 导出的 PDF 标题为「幻灯片 1」 | PDF 元数据 title 不可信，`is_generic_title` 未收录此类占位 | `pick_title` 加**内容一致性判据**：元数据标题须出现在正文中，否则回退文件名（不枚举占位符） |
-| logo/装饰图 OCR 出 `G`/`C` 噪音污染正文 | 「有文字即写正文」，未识别单字符伪影（实测其置信度并不低） | OCR 结果去空白后 `≤2` 字即判噪音 → 归 defer（诚实标记；置信度仅日志提示） |
+| PDF 页眉水印污染正文/表格 | 该 PDF 每页有页眉水印；且水印与表格 bbox 重叠时，`find_tables().extract()` 把水印字符混入单元格（`g_aaaBbb` → `g aaaBbb _`，下划线错位） | ①**跨页样板检测**：`(文字, bbox)` 在 ≥60% 页完全相同 → 判定页眉/页脚/水印并跳过（不枚举具体文字；仅含样板的页视为空页，不误渲染为扫描页）；②表格单元格改用 **words 重建**（只取完全落在单元格内的 word，再以**同格高度中位数 × 3.5** 滤旋转水印——自适应字号，不误删大字号表头） |
+| 箭头连接符被计入 `chart` defer | `LINE`(连接符)/`FREEFORM` 无内容载体，却计入未处理形状 | `chart` defer 排除 `LINE`/`FREEFORM`；保留 `CHART`/`EMBEDDED_OLE_OBJECT` 等真内容载体 |
 | 纯表格 xlsx 的 `summary` 为空 | `extract_summary` 取不到正文段落 | 无摘要时回退「（表格文档：约 N 行数据）」占位 |
 
-**说明**：`summary` 为抽取式启发式，可能取到「目 录」「页眉」等样板文本——**正文完整无损**，此类语义优化交由 stage2 大模型处理，stage1 不做过拟合。
+**刻意不做的**：
+- **不按长度过滤 OCR 短结果**。结果长度与「是否噪音」**无因果关系**（真噪音 `G/ooy/()` 与真标签 `VM/AI/def/Sun` 长度完全重叠），按长度丢弃会**误删真实短标签**，违反精度优先。零碎伪影保留在正文，由 stage2 结合图片上下文区分。
+- **`summary` 取到「目 录」「页眉」等样板不限修**：`summary` 是抽取式启发式，正文**完整无损**，此类语义优化交 stage2。
 
 ---
 
@@ -515,5 +518,5 @@ pip install -e .                       # 注册 doc2md 命令
 doc2md                                 # 零参数: 自动定位 input-examples, 输出到 ./knowledge/
 cat knowledge/index/catalog.yaml       # 看导航索引
 cat knowledge/index/handoff.yaml       # 看 stage2 交接说明
-python tests/run_all.py                # 跑回归测试 (133/133)
+python tests/run_all.py                # 跑回归测试
 ```

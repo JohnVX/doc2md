@@ -1,9 +1,9 @@
-"""回归测试: 针对实际产物检查中发现的 4 个缺陷的修复.
+"""回归测试: 针对实际产物检查中发现的缺陷的修复.
 
 1. 表格单元格 \\x0b (垂直制表符) 换行 -> 表格断裂
 2. PDF 元数据占位标题 (如 "幻灯片 1") 被采信
-3. 装饰图/logo OCR 出 1-2 字符噪音 -> 污染正文
-4. 纯表格文档 summary 为空
+3. 纯表格文档 summary 为空
+(注: OCR 短结果不做长度过滤——长度与是否噪音无因果关系, 误删真标签风险高)
 """
 from tests._runner import assert_eq, assert_true
 
@@ -88,33 +88,51 @@ CASES.append(("pick_title_short_candidate_not_rejected",
               test_pick_title_short_candidate_not_rejected))
 
 
-# ---------- BUG 3: OCR 噪音 ----------
+# ---------- 决策: 保留 OCR 短结果 (不做长度过滤) ----------
 
-def test_ocr_noise_short_is_noise():
-    """极短结果 (1-2 字符) 判为噪音, 即便置信度高."""
-    assert_true(ocr._is_ocr_noise(["G"], [0.73]), "单字符应判噪音")
-    assert_true(ocr._is_ocr_noise(["C"], [0.90]), "单字符高置信仍是噪音")
-    assert_true(ocr._is_ocr_noise(["AB"], [0.5]), "2 字符也算噪音")
-
-
-def test_ocr_noise_real_text_kept():
-    """真实短文本 (>=3 字符) 不应判为噪音."""
-    assert_true(not ocr._is_ocr_noise(["HUAWEI"], [0.94]), "6 字符是真文字")
-    assert_true(not ocr._is_ocr_noise(["图11"], [0.6]), "3 字符保留")
-    assert_true(not ocr._is_ocr_noise(["abc"], [0.5]), "3 字符保留")
-
-
-def test_ocr_noise_empty_not_noise():
-    """空结果不算 '噪音' (由上层按无文字处理)."""
-    assert_true(not ocr._is_ocr_noise([], []), "空列表不判噪音")
+def test_ocr_short_result_kept():
+    """OCR 短结果 (如单字符伪影 "G") 应原样保留, 不按长度丢弃."""
+    # 行为断言: mock 引擎返回极短结果, 验证 ocr_image 不过滤
+    def fake_engine(_img):
+        return ([[[0, 0, 10, 10], "G", 0.73]], 0.01)
+    orig = ocr._engine_obj
+    orig_avail = ocr.available
+    ocr._engine_obj = lambda: fake_engine
+    ocr.available = lambda: True
+    try:
+        out = ocr.ocr_image(b"fake-bytes")
+    finally:
+        ocr._engine_obj = orig
+        ocr.available = orig_avail
+    assert_eq(out, "G", "单字符 OCR 结果应保留而非归 defer")
 
 
-CASES.append(("ocr_noise_short_is_noise", test_ocr_noise_short_is_noise))
-CASES.append(("ocr_noise_real_text_kept", test_ocr_noise_real_text_kept))
-CASES.append(("ocr_noise_empty_not_noise", test_ocr_noise_empty_not_noise))
+def test_ocr_multi_noise_kept():
+    """多字符伪影 (如 "ooy") 也保留; 空结果返回空串."""
+    def fake_engine(_img):
+        return ([[[0, 0, 9, 9], "ooy", 0.64], [[0, 10, 9, 19], "()", 0.5]], 0.01)
+    def fake_empty(_img):
+        return (None, 0.01)
+    orig = ocr._engine_obj
+    orig_avail = ocr.available
+    ocr.available = lambda: True
+    try:
+        ocr._engine_obj = lambda: fake_engine
+        out = ocr.ocr_image(b"fake")
+        ocr._engine_obj = lambda: fake_empty
+        empty = ocr.ocr_image(b"fake")
+    finally:
+        ocr._engine_obj = orig
+        ocr.available = orig_avail
+    assert_eq(out, "ooy\n()", "短伪影应保留")
+    assert_eq(empty, "", "无结果返回空串")
 
 
-# ---------- BUG 4: 纯表格 summary ----------
+CASES.append(("ocr_short_result_kept", test_ocr_short_result_kept))
+CASES.append(("ocr_multi_noise_kept", test_ocr_multi_noise_kept))
+
+
+# ---------- BUG 3: 纯表格 summary ----------
 
 def test_table_summary_fallback_for_pure_table():
     """纯表格正文 -> 返回表格规模占位摘要."""

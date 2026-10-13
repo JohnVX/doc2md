@@ -201,8 +201,3 @@ def detect(path: str):
     # 其余: 文本类
     fmt, handler, meta = _sniff_text(path, ext, name, stem)
     return {"format": fmt, "handler": handler, "ext": ext, "meta": meta}
-
-
-def supported_handlers():
-    """本环境已具备能力的 handler 集合."""
-    return {"md", "text", "docx", "pptx", "xlsx", "pdf", "image"}

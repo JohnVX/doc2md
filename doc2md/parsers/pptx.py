@@ -27,7 +27,7 @@ def parse(path, ctx=None):
     first_slide_title = ""
     if prs.slides:
         try:
-            first_slide_title = _slide_title(prs.slides[0])
+            first_slide_title = _slide_title(prs.slides[0])[0]
         except Exception:
             first_slide_title = ""
     title = util.pick_title([first_slide_title, core_title], stem)
@@ -54,35 +54,55 @@ def _walk(shapes):
 
 
 def _slide_title(slide):
-    """取幻灯片标题."""
+    """取幻灯片标题. 返回 (标题文本, 来源 shape 或 None).
+
+    来源 shape 供 _render_slide 跳过, 避免兜底取用的首个文本框又在正文
+    重复输出一次.
+    """
     try:
         t = slide.shapes.title
         if t is not None and t.text.strip():
-            return t.text.strip()
+            return t.text.strip(), t
     except Exception:
         pass
-    # 兜底: 首个非空文本框
+    # 兜底: 首个非空文本框, 仅当其为**单行**时视为标题 (多行文本框是正文,
+    # 不能拿首行当标题而丢掉其余行). 返回来源 shape 供跳过.
     for sh in _walk(slide.shapes):
-        if sh.has_text_frame and sh.text_frame.text.strip():
-            return sh.text_frame.text.strip().splitlines()[0].strip()
-    return ""
+        try:
+            if sh.has_text_frame and sh.text_frame.text.strip():
+                lines = [x for x in sh.text_frame.text.splitlines() if x.strip()]
+                if len(lines) == 1:
+                    return lines[0].strip(), sh
+        except Exception:
+            continue
+    return "", None
+
+
+def _same_shape(a, b):
+    """两个 shape 是否指同一对象.
+
+    python-pptx 每次遍历/属性访问都返回**新包装对象**, `a is b` 永远为假;
+    必须比较底层 XML element(_element 稳定), 否则标题 placeholder 会被重复输出.
+    """
+    if a is None or b is None:
+        return False
+    ea = getattr(a, "_element", None)
+    eb = getattr(b, "_element", None)
+    if ea is not None and eb is not None:
+        return ea is eb
+    return a is b
 
 
 def _render_slide(idx, slide, ctx, deferred):
     """渲染一张幻灯片为 md."""
-    title = _slide_title(slide)
+    title, title_shape = _slide_title(slide)
     head = f"## Slide {idx}" + (f": {title}" if title else "")
-    title_shape = None
-    try:
-        title_shape = slide.shapes.title
-    except Exception:
-        pass
 
     items = []
     img_no = 0
     unhandled = 0
     for sh in _walk(slide.shapes):
-        if title_shape is not None and sh is title_shape:
+        if _same_shape(sh, title_shape):
             continue
         handled = False
         if sh.has_text_frame:
@@ -101,7 +121,19 @@ def _render_slide(idx, slide, ctx, deferred):
         except Exception:
             pass
         if not handled:
-            unhandled += 1
+            # 排除纯装饰形状: LINE(连接符/箭头)/FREEFORM(自由图形) 无内容载体,
+            # 计入 chart defer 会让 stage2 误以为有大量图表待处理 (实际只是箭头).
+            # 保留 CHART/EMBEDDED_OLE_OBJECT 等真内容载体.
+            # 注意: MSO_SHAPE_TYPE 必须在此局部 import (模块级 import 在 parse() 内,
+            # 否则此处 NameError 被 except 吞掉 —— 同 _walk 的坑).
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
+            st = None
+            try:
+                st = sh.shape_type
+            except Exception:
+                pass
+            if st not in (MSO_SHAPE_TYPE.LINE, MSO_SHAPE_TYPE.FREEFORM):
+                unhandled += 1
     if unhandled:
         items.append(defer(deferred, "chart", unhandled, "图表/SmartArt等未提取"))
 
@@ -160,4 +192,7 @@ def _handle_picture(sh, no, ctx, items, deferred):
     except Exception:
         return
     dest, ref = util.save_asset(blob, ctx, ext)
-    items.append(f"![图{no}]({ref})\n\n<!-- ocr:img:{dest} -->")
+    if dest:
+        items.append(f"![图{no}]({ref})\n\n<!-- ocr:img:{dest} -->")
+    else:
+        items.append(defer(deferred, "image-ocr", 1, "图片未存盘"))

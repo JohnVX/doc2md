@@ -50,15 +50,23 @@ def parse(path, ctx=None):
             page_entries.setdefault(pg, []).append((lvl, t))
 
         n = doc.page_count
+        boilerplate = _find_boilerplate(doc)
+        if boilerplate:
+            log.info("PDF 检出 %d 个跨页样板 block (页眉/页脚/水印), 已跳过: %s",
+                     len(boilerplate), Path(path).name)
         out = []
         for i in range(n):
             segs = []
             for lvl, t in page_entries.get(i + 1, []):
                 lvl = max(1, min(6, lvl))
                 segs.append((0.0, "head", "#" * lvl + " " + t))
-            segs.extend(_page_segments(doc[i]))
+            segs.extend(_page_segments(doc[i], boilerplate))
             if not segs:
                 # 无文字/表格/大纲 -> 扫描页, 渲染+OCR (不直接跳过)
+                # 例外: 该页本有文字层(如只剩页眉/水印被剔除) -> 视为空页,
+                # 不渲染扫描页 (否则封面/分隔页会凭空产生 ![扫描页] + OCR 开销)
+                if _has_text_layer(doc[i]):
+                    continue
                 out.append(_ocr_scan_page(doc[i], ctx, deferred))
                 continue
             segs.sort(key=lambda s: s[0])
@@ -87,7 +95,45 @@ def parse(path, ctx=None):
     return {"title": title, "body": body, "tags": [], "meta": {}, "deferred": deferred}
 
 
-def _page_segments(fpage):
+def _find_boilerplate(doc, min_ratio=0.6, min_pages=3):
+    """检出跨页重复的样板 block (页眉/页脚/水印).
+
+    判据: (归一化文字, 取整 bbox) 在 >= max(min_pages, 页数*min_ratio) 页上完全相同.
+    正常正文不可能在多页一字不差地出现在同一位置; 而页眉/水印/页脚必然如此.
+    返回 set[(text, x0, y0, x1, y1)].
+    """
+    from collections import Counter
+    cnt = Counter()
+    total = doc.page_count
+    for i in range(total):
+        seen = set()
+        try:
+            blocks = doc[i].get_text("blocks")
+        except Exception:
+            continue
+        for b in blocks:
+            x0, y0, x1, y1, text = (list(b) + [None] * 5)[:5]
+            t = " ".join((text or "").split())
+            if not t:
+                continue
+            key = (t, round(x0), round(y0), round(x1), round(y1))
+            if key not in seen:
+                seen.add(key)
+                cnt[key] += 1
+    thr = max(min_pages, total * min_ratio)
+    return {k for k, c in cnt.items() if c >= thr}
+
+
+def _is_boilerplate_block(b, boilerplate):
+    """该 block 是否命中样板集."""
+    x0, y0, x1, y1, text = (list(b) + [None] * 5)[:5]
+    t = " ".join((text or "").split())
+    if not t:
+        return False
+    return (t, round(x0), round(y0), round(x1), round(y1)) in boilerplate
+
+
+def _page_segments(fpage, boilerplate=None):
     """返回 [(y, type, md), ...] 该页的表格/文字/标题段."""
     segs = []
     # 表格 (fitz find_tables; 抛异常则该页无表格)
@@ -96,10 +142,18 @@ def _page_segments(fpage):
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             for tb in fpage.find_tables().tables:
-                ext = tb.extract()
-                if not ext:
+                # 用 rows[].cells[] (坐标) 自己重建单元格文本 (而非 tb.extract() 直接取文本).
+                # 原因: 水印/页眉文字与表格 bbox 重叠时, extract() 会把横穿的
+                # 水印字符混进单元格 (如 g_aaaBbb -> "g aaaBbb _", 下划线错位);
+                # 只取"完全落在单元格内且行高正常"的 word, 避开旋转水印.
+                tb_rows = getattr(tb, "rows", None)
+                if not tb_rows:
                     continue
-                rows = [[("" if c is None else str(c)) for c in r] for r in ext]
+                rows = []
+                for tr in tb_rows:
+                    cells = [_cell_text(fpage, c) if c is not None else ""
+                             for c in tr.cells]
+                    rows.append(cells)
                 nrows = len(rows)
                 ncols = max((len(r) for r in rows), default=0)
                 if nrows < 2 or ncols < 2:
@@ -110,7 +164,7 @@ def _page_segments(fpage):
 
     table_bboxes = [t[0] for t in tables]
 
-    # 文字块 (fitz), 排除落在表格 bbox 内的 (避免与表格重复)
+    # 文字块 (fitz), 排除落在表格 bbox 内的 (避免与表格重复) 与样板(水印/页眉页脚)
     try:
         blocks = fpage.get_text("blocks")
     except Exception:
@@ -121,12 +175,83 @@ def _page_segments(fpage):
             continue
         if _in_any_table((x0, y0, x1, y1), table_bboxes):
             continue
+        if boilerplate and _is_boilerplate_block(b, boilerplate):
+            continue
         segs.append((y0, "text", text.strip()))
 
     # 表格段
     for bbox, rows, ncols in tables:
         segs.append((bbox[1], "table", md_table(rows, ncols)))
     return segs
+
+
+def _cell_text(fpage, clip_bbox, max_word_h=120, h_ratio=3.5):
+    """用 words 重建单元格文本, 只取完全落在 bbox 内的 word.
+
+    clip_bbox: fitz.Rect 或 (x0,y0,x1,y1).
+    水印过滤: 旋转/倾斜的水印 word bbox 很高. 主判据为**相对高度**:
+    word 高 > 同格 word 高度中位数 x h_ratio 者视为水印剔除 —— 自适应字号,
+    不误删大字号表头(实测大字号约 2.5x 中位数, 水印达 7x以上).
+    max_word_h 为绝对安全阀, 防异常极端(整格仅水印时中位数被拉高, 相对判据失效),
+    取宽松值 120, 不阻挡合法大字号文字.
+    返回按行聚合(行内按 x 排序)的文本.
+    """
+    try:
+        import pymupdf as fitz
+        clip = clip_bbox if hasattr(clip_bbox, "x0") else fitz.Rect(clip_bbox)
+    except Exception:
+        return ""
+    inside = []
+    try:
+        words = fpage.get_text("words", clip=clip)
+    except Exception:
+        return ""
+    for w in words:
+        x0, y0, x1, y1, text = (list(w) + [None] * 5)[:5]
+        if not text:
+            continue
+        if (x0 + 1 >= clip.x0 and x1 - 1 <= clip.x1
+                and y0 + 1 >= clip.y0 and y1 - 1 <= clip.y1):
+            inside.append((y1 - y0, y0, x0, text))
+    if not inside:
+        return ""
+    hs = sorted(h for h, _, _, _ in inside)
+    med = hs[len(hs) // 2]
+    cap = min(max_word_h, max(med * h_ratio, med + 1))
+    ws = [(y, x, text) for h, y, x, text in inside if h <= cap]
+    if not ws:
+        return ""
+    ws.sort()
+    lines = []
+    cur = []
+    lasty = None
+    for y, x, text in ws:
+        if lasty is None or abs(y - lasty) <= 3:
+            cur.append((x, text))
+        else:
+            cur.sort()
+            lines.append(" ".join(t for _, t in cur))
+            cur = [(x, text)]
+        lasty = y
+    if cur:
+        cur.sort()
+        lines.append(" ".join(t for _, t in cur))
+    return "\n".join(lines)
+
+
+def _has_text_layer(fpage):
+    """该页是否存在任何文字层 block (含被剔除的样板).
+
+    用于区分"本就是扫描页(无文字层)"与"文字全是样板而变空"的页.
+    """
+    try:
+        for b in fpage.get_text("blocks"):
+            text = (list(b) + [None] * 5)[4]
+            if text and text.strip():
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _in_any_table(bbox, table_bboxes, tol=2):
@@ -147,4 +272,6 @@ def _ocr_scan_page(fpage, ctx, deferred, dpi=150):
     except Exception:
         return defer(deferred, "scan-page", 1, "渲染失败")
     dest, ref = util.save_asset(png, ctx, "png", prefix="scan")
+    if not dest:
+        return defer(deferred, "scan-page", 1, "扫描页未存盘")
     return f"![扫描页]({ref})\n\n<!-- ocr:scan:{dest} -->"

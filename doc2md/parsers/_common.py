@@ -43,19 +43,26 @@ def aggregate_deferred(items):
             by_type[t] = {"type": t, "count": it["count"], "note": it.get("note", "")}
     return list(by_type.values())
 
-# 母版/占位符样板文本 (中英), 命中则跳过
-_PLACEHOLDER = re.compile(
-    r"(单击此处添加|点击此处添加|单击添加|占位符|"
-    r"click\s+to\s+add|click\s+to\s+edit|placeholder\s*text|title\s*\d*)",
+# 母版/占位符样板文本 (中英). 用"整串匹配"而非全文子串:
+# 占位符是 Powerpoint 母版里的**固定短样板句**(如 "Click to add title"),
+# 真实正文(如 "Set the title style to bold"/"Click here to add a note")含关键词但非样板,
+# 不应误删. 否则违反"不丢内容"原则. 故只枚举固定词汇的整串形态.
+_PLACEHOLDER_EXACT = re.compile(
+    r"^(?:单击此处添加|点击此处添加|单击添加|占位符)(?:标题|文本|内容|副标题|图片)?$",
+    re.IGNORECASE)
+_PLACEHOLDER_EN = re.compile(
+    r"^(?:click\s+to\s+(?:add|edit)\s+(?:text|title|subtitle|content|picture|image)"
+    r"|placeholder\s*text\s*\d*"
+    r"|title\s*\d*)$",
     re.IGNORECASE)
 
 
 def is_placeholder(text):
-    """检测是否为母版占位符文本."""
-    s = text.strip().lower()
+    """检测是否为母版占位符文本 (整串固定样板, 不误删含关键词的真实正文)."""
+    s = text.strip()
     if not s:
         return True
-    return bool(_PLACEHOLDER.search(s))
+    return bool(_PLACEHOLDER_EXACT.match(s) or _PLACEHOLDER_EN.match(s))
 
 
 def md_table(rows, ncols=None):

@@ -44,7 +44,10 @@ def parse(path, ctx=None):
             # 表格单元格内的图片(表格 md 放不下图, 单独附后提取+OCR, 不静默丢失)
             for i, (blob, ext) in enumerate(_element_images(child, d), 1):
                 dest, ref = util.save_asset(blob, ctx, ext)
-                out.append(f"![表格图{i}]({ref})\n\n<!-- ocr:img:{dest} -->")
+                if dest:
+                    out.append(f"![表格图{i}]({ref})\n\n<!-- ocr:img:{dest} -->")
+                else:
+                    out.append(defer(deferred, "image-ocr", 1, "表格内嵌图未存盘"))
 
     # 浮动文本框防御 (body 之外的 drawing 里的文本)
     txbx = _extract_textboxes(d)
@@ -89,7 +92,10 @@ def _render_paragraph(p, d, ctx, deferred):
         chunks = [text] if text.strip() else []
         for i, (blob, ext) in enumerate(imgs, 1):
             dest, ref = util.save_asset(blob, ctx, ext)
-            chunks.append(f"![图{i}]({ref})\n\n<!-- ocr:img:{dest} -->")
+            if dest:
+                chunks.append(f"![图{i}]({ref})\n\n<!-- ocr:img:{dest} -->")
+            else:
+                chunks.append(defer(deferred, "image-ocr", 1, "内嵌图未存盘"))
         return "\n\n".join(chunks)
     # 空段
     if not text.strip():
@@ -169,15 +175,6 @@ def _list_info(p, d):
         except Exception:
             pass
     return (ordered, level)
-
-
-def _has_numpr(p):
-    """检测段落是否有编号属性."""
-    from docx.oxml.ns import qn
-    pPr = p._element.find(qn("w:pPr"))
-    if pPr is None:
-        return False
-    return pPr.find(qn("w:numPr")) is not None
 
 
 def _element_images(element, d):

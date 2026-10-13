@@ -1,4 +1,4 @@
-"""通用工具: sha256_file / stable_doc_id / slugify / relpath / save_asset / asset_ref /
+"""通用工具: sha256_file / stable_doc_id / relpath / save_asset /
 write_text(LF) / pick_title / is_generic_title / heading_slug."""
 import hashlib
 import os
@@ -18,14 +18,6 @@ def sha256_file(path, chunk=1 << 20):
 def stable_doc_id(relpath):
     """由源文件相对路径哈希生成稳定 doc-id (doc-xxxxxxxx)."""
     return "doc-" + hashlib.sha256(relpath.encode("utf-8")).hexdigest()[:8]
-
-
-_SLUG_RE = re.compile(r'[\\/:*?"<>|\s]+')
-
-def slugify(name):
-    """文件名 -> 安全 slug (去标点/空格转下划线)."""
-    s = _SLUG_RE.sub("_", Path(name).stem).strip("_")
-    return s or "doc"
 
 
 def relpath(path, base):
@@ -57,12 +49,6 @@ def save_asset(data, ctx, ext, prefix="img"):
     return dest, ref
 
 
-def asset_ref(ctx, dest):
-    """构造从 docs/<cat>/<id>.md 指向 original-doc/<doc_id>_assets/<dest> 的相对引用."""
-    doc_id = (ctx or {}).get("doc_id", "doc")
-    return f"../../original-doc/{doc_id}_assets/{dest}"
-
-
 def write_text(path, text, encoding="utf-8"):
     """写文本, 强制 LF 行尾 (跨平台一致: Windows 上也写 \\n 而非 CRLF)."""
     with open(path, "w", encoding=encoding, newline="\n") as f:
@@ -85,7 +71,9 @@ def is_generic_title(t):
         return True
     if s.lower() in _GENERIC_TITLES:
         return True
-    if "XXX" in s or "xxx" in s:
+    # 仅当标题主体就是 X 占位串(如 "XXX"/"XXXX"/"xxx")时才判通用;
+    # 不能因含 "xxx" 子串就丢——"Report XXX-2024"/"保险条款xxx版" 都是真实标题.
+    if re.fullmatch(r"[xX]{2,}", s):
         return True
     return False
 
@@ -126,8 +114,26 @@ def pick_title(candidates, stem, body=None):
 
 
 def heading_slug(title):
-    """markdown 标题锚点 slug: 去标点、小写、空格转 -, 保留 CJK 与字母数字."""
-    s = re.sub(r'[^\w\s]', '', title or "")
+    """markdown 标题锚点 slug: 去标点、小写、空格转 -, 保留 CJK/字母/数字/连字符.
+
+    连字符保留(与主流渲染器一致, 如 'a-b' -> 'a-b' 而非 'ab').
+    """
+    s = re.sub(r'[^\w\s-]', '', title or "")
     s = re.sub(r'\s+', '-', s.strip()).lower()
     return s or "section"
 
+
+def heading_slugs(titles):
+    """对一串标题生成唯一锚点(第一个用原名, 重复的加 -1/-2...).
+
+    与主流 markdown 渲染器(GitHub)对重复标题的去重规则一致, 避免目录里
+    多个链接指向同一锚点.
+    """
+    seen = {}
+    out = []
+    for t in titles:
+        base = heading_slug(t)
+        n = seen.get(base, 0)
+        seen[base] = n + 1
+        out.append(base if n == 0 else f"{base}-{n}")
+    return out

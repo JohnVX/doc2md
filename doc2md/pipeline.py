@@ -566,8 +566,10 @@ def _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_tim
     deferred = aggregate_deferred(parsed.get("deferred", []))
     # 长 md 顶部渲染目录(导航概览, 链接到章节锚点); 短文档不加
     if len(sections) >= 6:
-        toc_lines = "\n".join(f"- [{s['title']}](#{util.heading_slug(s['title'])})"
-                              for s in sections[:30])
+        shown = sections[:30]
+        slugs = util.heading_slugs([s["title"] for s in shown])
+        toc_lines = "\n".join(f"- [{s['title']}](#{sl})"
+                              for s, sl in zip(shown, slugs))
         body = f"## 目录\n\n{toc_lines}\n\n" + body
     doc = {
         "id": doc_id, "title": title, "category": category,
