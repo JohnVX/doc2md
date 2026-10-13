@@ -496,6 +496,25 @@ def _prune_entry(man, out, rel, entry):
         del man.entries[rel]
 
 
+def _table_summary_fallback(body):
+    """纯表格/无正文段文档 (如 xlsx) 的占位摘要: 用表格规模描述.
+
+    extract_summary 对无正文段落的文档返回空; 此处给一个可用的描述性摘要,
+    便于 catalog 导航. 无表格时返回 ''.
+    """
+    if "|" not in body:
+        return ""
+    lines = body.split("\n")
+    pipe_lines = [ln for ln in lines if ln.lstrip().startswith("|")]
+    if not pipe_lines:
+        return ""
+    # 分隔行 (|---|...) 与表头行 均非数据行; 逐个表格扣除
+    sep_re = re.compile(r"^\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?$")
+    n_sep = sum(1 for ln in pipe_lines if sep_re.match(ln.strip()))
+    n_data = max(0, len(pipe_lines) - 2 * n_sep)  # 每表扣 1 分隔 + 1 表头
+    return f"（表格文档：约 {n_data} 行数据，详见正文表格）"
+
+
 def _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time=0.0):
     """公共收尾(支持格式与 defer 共用): 去噪/分类/重分类清理/拷原文件/side files/写 md/入 manifest.
 
@@ -541,6 +560,8 @@ def _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_tim
         log.warning("原文件拷贝失败 %s: %s", rel, ex)
 
     summary = denoise.extract_summary(body)
+    if not summary:
+        summary = _table_summary_fallback(body)
     sections = denoise.extract_sections(body)
     deferred = aggregate_deferred(parsed.get("deferred", []))
     # 长 md 顶部渲染目录(导航概览, 链接到章节锚点); 短文档不加

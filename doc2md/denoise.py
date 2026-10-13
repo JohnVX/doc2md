@@ -8,12 +8,17 @@ import yaml
 
 
 def clean_text(text):
-    """折叠多余空行、去行尾空白、去首尾空行."""
+    """折叠多余空行、去行尾空白、去首尾空行.
+
+    用 split("\\n") 而非 splitlines(): 后者会把 \\x0b(垂直制表符, PPT 单元格内
+    换行符)/\\x0c 等也当作换行, 再用 \\n 重组 => 静默把 \\x0b 变成换行, 拆断
+    表格行. 这里只以真正的 \\n 为行界, 保留其它控制字符原样交给后续转义.
+    """
     if not text:
         return ""
     out = []
     blank = 0
-    for ln in text.splitlines():
+    for ln in text.split("\n"):
         ln = ln.rstrip()
         if ln.strip() == "":
             blank += 1

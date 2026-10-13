@@ -28,6 +28,9 @@ _ocr_count = 0  # 累计 OCR 次数
 _ocr_first_ts = None  # 首次 OCR 开始时刻 (用于墙钟跨度)
 _ocr_last_ts = None  # 最后一次 OCR 结束时刻
 
+# 噪音判定阀值: 结果极短(<=N字) 视为 logo/装饰图伪影 -> 归 defer
+NOISE_MAX_CHARS = 2
+
 
 def reset_ocr_stats():
     """清零累计 OCR 统计 (每轮 run 开始时调用)."""
@@ -158,10 +161,24 @@ def is_ocr_supported(blob):
     return True
 
 
+def _is_ocr_noise(lines, scores):
+    """判定 OCR 结果是否为噪音伪影 (logo/装饰图被误识出的 1-2 字符).
+
+    以**长度为主判据**: 实测 logo 伪影的单字符置信度并不低 (如华为 logo 误识
+    为 "G" score=0.73), 故置信度无法单独区分; 而真实短文本(如 "HUAWEI" 6字)
+    长度明显不同. 规则: 去空白后总字数 <= NOISE_MAX_CHARS 即归 defer
+    (保持"诚实标记"哲学: 宁可 defer 交 stage2, 不把噪音写进正文).
+    置信度仅用于日志提示.
+    """
+    joined = "".join(lines).strip()
+    return bool(joined) and len(joined) <= NOISE_MAX_CHARS
+
+
 def ocr_image(img, ctx=None):
-    """对图片 OCR, 返回按块顺序拼接的纯文本(每块一行). 无文本/无引擎返回 ''.
+    """对图片 OCR, 返回按块顺序拼接的纯文本(每块一行). 无文本/无引擎/噪音返回 ''.
 
     img: 文件路径(str) 或图片字节(bytes).
+    疑似噪音 (极短 + 低置信度, 如 logo 被认成 "G") 也返回 '' -> 调用方写 defer.
     """
     if not available():
         return ""
@@ -187,12 +204,19 @@ def ocr_image(img, ctx=None):
     if not result:
         return ""
     lines = []
+    scores = []
     for item in result:
         # rapidocr 每项: [box, text, score]
         if item and len(item) >= 2 and item[1]:
             t = item[1].strip()
             if t:
                 lines.append(t)
+                if len(item) >= 3 and isinstance(item[2], (int, float)):
+                    scores.append(float(item[2]))
+    if _is_ocr_noise(lines, scores):
+        log.info("OCR 结果疑似噪音(极短), 归 defer: %r (score=%.2f)",
+                 "".join(lines)[:10], (sum(scores) / len(scores)) if scores else -1.0)
+        return ""
     return "\n".join(lines)
 
 

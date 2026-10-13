@@ -90,11 +90,38 @@ def is_generic_title(t):
     return False
 
 
-def pick_title(candidates, stem):
-    """从候选标题里取第一个非通用的, 否则用文件名主干."""
+def _norm_for_match(s):
+    """归一化用于子串比对: 去空白与常见标点, 小写."""
+    return re.sub(r"[\s\u3000“”\"'\\[\\]（）()《》【】,，。.、:：;；-]", "", s or "").lower()
+
+
+def title_in_body(title, body, min_len=2):
+    """标题是否作为内容出现在正文中 (判断元数据标题是否可信).
+
+    元数据标题不可信时 (如 PPT 导 PDF 时把“幻灯片 1”写进了 PDF title),
+    它不会出现在正文里; 而真实的文档标题通常会在正文首部出现.
+    用归一化子串匹配; 标题过短 (< min_len) 时无法可靠判断, 返回 True (不否定).
+    """
+    nt = _norm_for_match(title)
+    if len(nt) < min_len:
+        return True
+    return nt in _norm_for_match(body)
+
+
+def pick_title(candidates, stem, body=None):
+    """从候选标题里取第一个非通用且(可选)在正文中出现的, 否则用文件名主干.
+
+    candidates: 元数据标题候选 (按优先级).
+    body: 可选, 文档正文; 提供时额外要求标题出现在正文中 (过滤不可信的
+          元数据占位标题, 如“幻灯片 1”), 否则回退到文件名.
+    """
     for c in candidates:
-        if c and not is_generic_title(c):
-            return c.strip()
+        if not c or is_generic_title(c):
+            continue
+        c = c.strip()
+        if body is not None and not title_in_body(c, body):
+            continue
+        return c
     return stem
 
 

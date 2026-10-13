@@ -142,7 +142,9 @@ def _render_table(tbl):
         return ""
     rows = []
     for r in tbl.rows:
-        cells = [c.text.replace("\n", " ").replace("|", "\\|").strip() for c in r.cells]
+        # 不在此转义: 提取原始文本, 转义统一由 md_table 的 esc 处理
+        # (避免 | 被双重转义 => \\\|)
+        cells = [c.text for c in r.cells]
         rows.append(cells)
     return md_table(rows, ncols)
 

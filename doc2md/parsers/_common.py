@@ -68,8 +68,16 @@ def md_table(rows, ncols=None):
         return ""
 
     def esc(c):
-        """转义表格单元格特殊字符."""
-        return str(c).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").strip()
+        """转义表格单元格特殊字符.
+
+        注意: 除 \\n 外还需处理 \\x0b(垂直制表符)/\\x0c(换页)等 —— PowerPoint/
+        Word 单元格内换行用 \\x0b(python-pptx 的 cell.text 会返回它), 不处理会
+        导致 markdown 表格行被拆断.
+        """
+        s = str(c)
+        for ch in ("\n", "\x0b", "\x0c", "\r"):
+            s = s.replace(ch, " ")
+        return s.replace("\\", "\\\\").replace("|", "\\|").strip()
 
     def pad(r):
         """补齐行到 ncols 列."""

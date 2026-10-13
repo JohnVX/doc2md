@@ -43,7 +43,6 @@ def parse(path, ctx=None):
                     "body": defer(deferred, "encrypted", 1, f"PDF加密: {Path(path).name}"),
                     "tags": [], "meta": {}, "deferred": deferred}
         meta_title = (doc.metadata or {}).get("title") or ""
-        title = util.pick_title([meta_title], stem)
         toc = doc.get_toc()
         # page(1-based) -> [(level, title), ...]
         page_entries = {}
@@ -83,6 +82,8 @@ def parse(path, ctx=None):
 
     if not body:
         body = f"<!-- 空 PDF / 全图无文字层: {Path(path).name} -->"
+    # 标题需正文参与判定 (过滤不可信的元数据占位标题, 如 "幻灯片 1")
+    title = util.pick_title([meta_title], stem, body=body)
     return {"title": title, "body": body, "tags": [], "meta": {}, "deferred": deferred}
 
 
