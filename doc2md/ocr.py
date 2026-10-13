@@ -13,6 +13,7 @@ DOC2MD_OCR_INTRA_OP 可调), 并 monkey-patch InferenceSession 兜底.
 import logging
 import os
 import threading
+import time
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
@@ -22,6 +23,32 @@ _engine = None
 _lock = threading.Lock()
 _probed = None  # None=未探测 True/False
 _broken = False  # 引擎初始化失败后置 True, 后续不再重试
+_ocr_seconds = 0.0  # 累计 OCR 纯耗时 (秒, 多线程下为各调用之和)
+_ocr_count = 0  # 累计 OCR 次数
+_ocr_first_ts = None  # 首次 OCR 开始时刻 (用于墙钟跨度)
+_ocr_last_ts = None  # 最后一次 OCR 结束时刻
+
+
+def reset_ocr_stats():
+    """清零累计 OCR 统计 (每轮 run 开始时调用)."""
+    global _ocr_seconds, _ocr_count, _ocr_first_ts, _ocr_last_ts
+    with _lock:
+        _ocr_seconds = 0.0
+        _ocr_count = 0
+        _ocr_first_ts = None
+        _ocr_last_ts = None
+
+
+def ocr_stats():
+    """返回 (累计纯耗时秒, 次数, 墙钟跨度秒).
+
+    墙钟跨度 = 最后一次 OCR 结束 - 首次 OCR 开始; 多线程时反映真实日历时间.
+    """
+    with _lock:
+        span = 0.0
+        if _ocr_first_ts is not None and _ocr_last_ts is not None:
+            span = _ocr_last_ts - _ocr_first_ts
+        return _ocr_seconds, _ocr_count, span
 
 
 def available():
@@ -138,6 +165,7 @@ def ocr_image(img, ctx=None):
     """
     if not available():
         return ""
+    t0 = time.time()
     try:
         eng = _engine_obj()
         if eng is None:
@@ -146,6 +174,16 @@ def ocr_image(img, ctx=None):
     except Exception as e:
         log.warning("OCR 失败 (%r): %s", img if isinstance(img, str) else "<bytes>", e)
         return ""
+    finally:
+        global _ocr_seconds, _ocr_count, _ocr_first_ts, _ocr_last_ts
+        now = time.time()
+        dt = now - t0
+        with _lock:
+            _ocr_seconds += dt
+            _ocr_count += 1
+            if _ocr_first_ts is None:
+                _ocr_first_ts = t0
+            _ocr_last_ts = now
     if not result:
         return ""
     lines = []

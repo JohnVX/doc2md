@@ -39,6 +39,8 @@ MAX_OCR_THREADS = None  # None=自动嗅探
 BATCH_MODE = None  # None=自动嗅探; True/False 可测试强制
 OCR_MODE = None  # None=自动(解析后决策); "process"/"thread" 可测试强制
 OCR_PROCS = None  # None=自动; ProcessPool 进程数 (process 模式)
+_CPUS = 0  # 嗅探到的实际核数 (日志用)
+_AVAIL_MB = 0  # 嗅探到的可用内存 MB (日志/决策用)
 
 _OCR_RE = re.compile(r'<!-- ocr:(img|scan):(\S+) -->')
 _ocr_pool = None  # ProcessPool for OCR (process 模式, 惰性创建, pipeline 结束后 shutdown)
@@ -605,18 +607,24 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
 
     # --- 资源嗅探: 自动调节并行度 (无人工配置) ---
     global MAX_WORKERS, MAX_OCR_THREADS, BATCH_MODE, OCR_MODE, OCR_PROCS, _ocr_pool
-    global _ocr_text_cache
+    global _ocr_text_cache, _CPUS, _AVAIL_MB
     _ocr_text_cache = {}  # 每轮清空 (防上次残留)
-    _avail_mb = 0
+    ocr.reset_ocr_stats()  # 清零累计 OCR 耗时 (本进程)
     if MAX_WORKERS is None or MAX_OCR_THREADS is None or BATCH_MODE is None:
-        dw, dt, cpus, _avail_mb, batch_mode = _detect_resources()
+        dw, dt, cpus, _CPUS, batch_mode = _detect_resources()
         if MAX_WORKERS is None:
             MAX_WORKERS = dw
         if MAX_OCR_THREADS is None:
             MAX_OCR_THREADS = dt
         if BATCH_MODE is None:
             BATCH_MODE = batch_mode
+    else:
+        _CPUS = _CPUS or (os.cpu_count() or 1)
     batch_mode = BATCH_MODE
+    _AVAIL_MB = _AVAIL_MB or 0
+
+    # 阶段计时 (结束时汇总)
+    _t_scan = _t_parse = _t_ocr = 0.0
 
     # --- 路径校验 ---
     in_dir = Path(input_dir).resolve()
@@ -652,6 +660,7 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
 
     # === 阶段 1: 串行预处理 (检测/sha/跳过/重分类/不支持格式) ===
     interrupted = False
+    _ts = time.time()
     try:
         for p in files:
             info = detector.detect(str(p))
@@ -700,6 +709,7 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
         interrupted = True
         log.warning("收到中断信号 (扫描阶段), 保存已处理部分并退出...")
 
+    _t_scan = time.time() - _ts
     if not interrupted:
         log.info("扫描完成: %d 待解析, %d 跳过, %d 不支持 (共 %d 文件)",
                  len(parse_items), skipped, len(finalize_items), len(files))
@@ -764,6 +774,8 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
             for f in future_map.values():
                 f.cancel()
             pool.shutdown(wait=True, cancel_futures=True)
+        _t_parse = time.time() - _ts - _t_scan  # 解析阶段 (扣扫描)
+        _t_ocr_start = time.time()
 
         # batch 模式: pool 已 shutdown (worker 进程已退出), OCR 不与解析叠加
         # 即使中断, 仍写出已解析完的文件 (parse_results 只含成功的)
@@ -773,33 +785,42 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
                 len(_OCR_RE.findall(pr[0].get("body", "")))
                 for pr in parse_results.values())
             if OCR_MODE is None or OCR_PROCS is None:
-                m, w = _ocr_mode_decision(batch_mode, MAX_OCR_THREADS, _avail_mb, total_ocr_images)
+                m, w = _ocr_mode_decision(batch_mode, MAX_OCR_THREADS, _AVAIL_MB, total_ocr_images)
                 if OCR_MODE is None:
                     OCR_MODE = m
                 if OCR_PROCS is None:
                     OCR_PROCS = w
-            # 打印决策详情
+            # 打印决策详情 (一行含模式/数量/判定依据)
             if total_ocr_images > 0:
+                proc_budget = max(0, (_AVAIL_MB - 1024) // 400)
+                need_by_imgs = total_ocr_images // 10
+                # 自动决策下的“应然”模式 (用于解释; 即使被测试强制也说得清)
+                auto_mode, auto_w = _ocr_mode_decision(
+                    batch_mode, MAX_OCR_THREADS, _AVAIL_MB, total_ocr_images)
+                forced = " (测试强制)" if (OCR_MODE != auto_mode) else ""
                 if OCR_MODE == "process":
-                    log.info("OCR 模式: %d 图 → ProcessPool %d 进程 "
-                             "(瓶颈=CPU预算%d; 每10图1进程需%d, 内存可容%d进程)",
-                             total_ocr_images, OCR_PROCS,
-                             MAX_OCR_THREADS,
-                             total_ocr_images // 10,
-                             max(0, (_avail_mb - 1024) // 400))
+                    log.info(
+                        "OCR 决策: process(%d 进程)%s [Linux+batch+图%d≥50+核%d≥2, "
+                        "worker=min(OCR%d, 图/10=%d, 内存%d) → %d]",
+                        OCR_PROCS, forced, total_ocr_images, _CPUS,
+                        MAX_OCR_THREADS, need_by_imgs, proc_budget, OCR_PROCS)
                 else:
                     if sys.platform == "win32":
                         reason = "Windows:spawn开销高"
                     elif total_ocr_images < 50:
-                        reason = "图<50"
+                        reason = "图%d<50" % total_ocr_images
                     elif not batch_mode:
-                        reason = "非batch"
+                        reason = "非batch(可用%.1fGB<4GB)" % (_AVAIL_MB / 1024)
                     elif MAX_OCR_THREADS < 2:
                         reason = "max_ocr<2"
+                    elif proc_budget < 2:
+                        reason = "内存不足(可容%d进程<2)" % proc_budget
                     else:
-                        reason = "内存不足"
-                    log.info("OCR 模式: %d 图 → ThreadPool %d 线程 (%s)",
-                             total_ocr_images, MAX_OCR_THREADS, reason)
+                        reason = "自动应选process"
+                    log.info(
+                        "OCR 决策: thread(%d 线程)%s [%s; 核%d, 可用%.1fGB, 图%d]",
+                        MAX_OCR_THREADS, forced, reason, _CPUS, _AVAIL_MB / 1024,
+                        total_ocr_images)
             if total_ocr_images > 0:
                 ocr_unit = "进程" if OCR_MODE == "process" else "线程"
                 ocr_n = OCR_PROCS if OCR_MODE == "process" else MAX_OCR_THREADS
@@ -858,6 +879,7 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
                 log.info("OCR 完成: %d 图, %.1fs, %.1f 图/s",
                          total_ocr_images, ocr_elapsed,
                          total_ocr_images / ocr_elapsed if ocr_elapsed > 0 else 0)
+            _t_ocr = time.time() - ocr_t0
 
         if interrupted:
             log.warning("收到中断信号 (解析/收尾阶段), 保存已处理部分并退出...")
@@ -906,4 +928,14 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
     log.info("完成: 处理 %d, 跳过 %d, 失败 %d, 清理 %d, 不支持 %d, defer %d (%.1fs)",
              processed, skipped, errors, purged, unsupported, deferred,
              time.time() - _t_start)
+    if not interrupted:
+        _total = time.time() - _t_start
+        # OCR 耗时: batch 模式用相位墙钟; 流式/内联用累计器的墙钟跨度
+        _ocr_sum, _ocr_n, _ocr_span = ocr.ocr_stats()
+        _t_ocr_show = max(_t_ocr, _ocr_span)
+        # 流式模式下 OCR 内联在解析阶段, 从解析中扣除, 避免重叠计
+        _t_parse_show = max(0.0, _t_parse - (_t_ocr_show - _t_ocr))
+        _t_other = max(0.0, _total - _t_scan - _t_parse_show - _t_ocr_show)
+        log.info("阶段耗时: 扫描 %.1fs | 解析 %.1fs | OCR %.1fs (%d 图) | 写出/索引 %.1fs | 总计 %.1fs",
+                 _t_scan, _t_parse_show, _t_ocr_show, _ocr_n, _t_other, _total)
     return processed, skipped, errors
