@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 from .. import util
-from ._common import defer, is_placeholder, md_table
+from ._common import defer, is_placeholder, render_table
 
 
 def parse(path, ctx=None):
@@ -40,7 +40,7 @@ def parse(path, ctx=None):
             if line is not None:
                 out.append(line)
         elif child in tbl_map:
-            out.append(_render_table(tbl_map[child]))
+            out.append(render_table(tbl_map[child]))
             # 表格单元格内的图片(表格 md 放不下图, 单独附后提取+OCR, 不静默丢失)
             for i, (blob, ext) in enumerate(_element_images(child, d), 1):
                 dest, ref = util.save_asset(blob, ctx, ext)
@@ -201,23 +201,6 @@ def _element_images(element, d):
 def _para_images(p, d):
     """返回段落内嵌图的 [(blob, ext), ...]."""
     return _element_images(p._element, d)
-
-
-def _render_table(tbl):
-    """渲染 docx 表格为 md 表格."""
-    try:
-        ncols = len(tbl.columns)
-    except Exception:
-        ncols = max((len(r.cells) for r in tbl.rows), default=0)
-    if ncols < 1 or not tbl.rows:
-        return ""
-    rows = []
-    for r in tbl.rows:
-        # 不在此转义: 提取原始文本, 转义统一由 md_table 的 esc 处理
-        # (避免 | 被双重转义 => \\\|)
-        cells = [c.text for c in r.cells]
-        rows.append(cells)
-    return md_table(rows, ncols)
 
 
 def _extract_textboxes(d):

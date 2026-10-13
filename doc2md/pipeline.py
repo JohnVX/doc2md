@@ -625,6 +625,49 @@ def _clear_old_assets(out, doc_id):
         shutil.rmtree(old_assets, ignore_errors=True)
 
 
+class _RunState:
+    """一次 run 的可变状态 (计数器/中断标志/阶段计时/待处理队列).
+
+    把原本散在 run() 里的共享可变变量收进一个对象, 使各阶段能拆成独立函数
+    而无需依赖模块级 global. 仅存运行期数据, 不跨 run 复用.
+    """
+
+    def __init__(self, in_dir, out, move):
+        self.in_dir = in_dir
+        self.out = out
+        self.move = move
+        self.conf = None
+        self.man = None
+        self.current_rels = set()
+        self.parse_items = []      # (p, info, rel, sha, doc_id, ctx, handler)
+        self.finalize_items = []   # (p, info, rel, sha, doc_id, parsed, is_error)
+        self.processed = 0
+        self.skipped = 0
+        self.errors = 0
+        self.unsupported = 0
+        self.purged = 0
+        self.deferred = 0
+        self.total_ocr_images = 0
+        self.interrupted = False
+        self.t_scan = 0.0
+        self.t_parse = 0.0
+        self.t_ocr = 0.0
+
+
+def _finalize_one(st, p, info, rel, sha, doc_id, parsed, parse_time=0.0):
+    """收尾单个文档并累计计数 (统一 processed/errors 口径)."""
+    try:
+        status = _finalize(st.out, st.move, st.man, st.conf, p, info, rel, sha,
+                           doc_id, parsed, parse_time)
+        if status == "write_fail":
+            st.errors += 1
+        else:
+            st.processed += 1
+    except Exception as ex:
+        log.error("收尾失败 %s: %s", rel, ex)
+        st.errors += 1
+
+
 def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
     """主流程入口: 路径校验 -> 三阶段处理 -> 清理 + 索引.
 
@@ -659,9 +702,6 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
             _AVAIL_MB = _probe_avail_mb()
     batch_mode = BATCH_MODE  # noqa: F841
 
-    # 阶段计时 (结束时汇总)
-    _t_scan = _t_parse = _t_ocr = 0.0
-
     # --- 路径校验 ---
     in_dir = Path(input_dir).resolve()
     out = Path(output_dir).resolve()
@@ -686,17 +726,50 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
 
     files = [p for p in in_dir.rglob("*") if p.is_file() and not p.name.startswith(".")]
     files.sort(key=lambda p: str(p).lower())
-    current_rels = {util.relpath(p, in_dir) for p in files}
     if not files:
         log.warning("输入目录为空, 无文件可处理: %s", in_dir)
 
-    processed = skipped = errors = unsupported = purged = deferred = 0
-    total_ocr_images = 0  # 本 run 的 OCR 图总数 (汇总用; 多进程下子进程计数不可见)
-    parse_items = []   # (p, info, rel, sha, doc_id, ctx, handler) — 需并行解析
-    finalize_items = []  # (p, info, rel, sha, doc_id, parsed, is_error) — 无需解析, 直接收尾
+    st = _RunState(in_dir, out, move)
+    st.conf = conf
+    st.man = man
+    st.current_rels = {util.relpath(p, in_dir) for p in files}
 
     # === 阶段 1: 串行预处理 (检测/sha/跳过/重分类/不支持格式) ===
-    interrupted = False
+    _scan_phase(st, files)
+
+    # === 阶段 2+3: 解析+收尾 ===
+    # batch (≥4GB): 全部解析 → shutdown pool → OCR. worker 与 OCR 不重叠, CPU 不叠加.
+    # streaming (<4GB): 解析一个 → 立即 OCR+写出+gc. 低内存安全, 1 worker 不叠加.
+    if not st.interrupted and st.parse_items:
+        _parse_finalize_phase(st, batch_mode)
+
+    # shutdown OCR ProcessPool (如有)
+    if _ocr_pool is not None:
+        _ocr_pool.shutdown(wait=True)
+        _ocr_pool = None
+
+    # finalize_items: 无需解析, 直接收尾
+    if not st.interrupted:
+        _finalize_no_parse_phase(st)
+
+    # === 阶段 4: 清理 + 保存 + 生成索引 ===
+    _cleanup_index_phase(st)
+
+    log.info("完成: 处理 %d, 跳过 %d, 失败 %d, 清理 %d, 不支持 %d, defer %d (%.1fs)",
+             st.processed, st.skipped, st.errors, st.purged, st.unsupported, st.deferred,
+             time.time() - _t_start)
+    if not st.interrupted:
+        _log_phase_timing(st, time.time() - _t_start)
+    return st.processed, st.skipped, st.errors
+
+
+def _scan_phase(st, files):
+    """阶段 1: 逐文件检测/哈希/跳过/重分类, 产出 parse_items 与 finalize_items.
+
+    串行执行 (轻量: 只读文件头做签名识别, 不解析内容).
+    """
+    in_dir, out, move = st.in_dir, st.out, st.move
+    man, conf = st.man, st.conf
     _ts = time.time()
     try:
         for p in files:
@@ -709,11 +782,11 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
             if handler is None or parsers.get(handler) is None:
                 if info["format"] == "empty":
                     u, pu = _handle_empty(man, out, rel, move)
-                    unsupported += u
-                    purged += pu
+                    st.unsupported += u
+                    st.purged += pu
                     continue
                 if not move and man.is_unchanged(rel, sha):
-                    skipped += 1
+                    st.skipped += 1
                     continue
                 _clear_old_assets(out, doc_id)
                 deferred_list = []
@@ -724,13 +797,13 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
                     "tags": [], "meta": {},
                     "deferred": deferred_list,
                 }
-                deferred += 1
+                st.deferred += 1
                 log.info("defer(stage2): %s (format=%s)", rel, info["format"])
-                finalize_items.append((p, info, rel, sha, doc_id, parsed, False))
+                st.finalize_items.append((p, info, rel, sha, doc_id, parsed, False))
             else:
                 if man.is_unchanged(rel, sha):
                     _try_reclassify(out, man, conf, p, rel)
-                    skipped += 1
+                    st.skipped += 1
                     continue
                 ctx = dict(info.get("meta", {}))
                 ctx.update({"relpath": rel, "doc_id": doc_id, "output_root": out})
@@ -741,240 +814,223 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
                 if size > LARGE_FILE_MB * 1024 * 1024:
                     log.warning("大文件(%d MB), 解析可能较慢: %s", size // (1024 * 1024), rel)
                 _clear_old_assets(out, doc_id)
-                parse_items.append((p, info, rel, sha, doc_id, ctx, handler))
+                st.parse_items.append((p, info, rel, sha, doc_id, ctx, handler))
     except KeyboardInterrupt:
-        interrupted = True
+        st.interrupted = True
         log.warning("收到中断信号 (扫描阶段), 保存已处理部分并退出...")
 
-    _t_scan = time.time() - _ts
-    if not interrupted:
+    st.t_scan = time.time() - _ts
+    if not st.interrupted:
         log.info("扫描完成: %d 待解析, %d 跳过, %d 不支持 (共 %d 文件)",
-                 len(parse_items), skipped, len(finalize_items), len(files))
+                 len(st.parse_items), st.skipped, len(st.finalize_items), len(files))
 
-    # === 阶段 2+3: 解析+收尾 ===
-    # batch (≥4GB): 全部解析 → shutdown pool → OCR. worker 与 OCR 不重叠, CPU 不叠加.
-    # streaming (<4GB): 解析一个 → 立即 OCR+写出+gc. 低内存安全, 1 worker 不叠加.
-    if not interrupted and parse_items:
-        max_workers = min(MAX_WORKERS, len(parse_items))
-        log.info("解析 %d 个文件 (%d 进程, %s)...", len(parse_items), max_workers,
-                 "批量" if batch_mode else "流式")
-        pool = ProcessPoolExecutor(max_workers=max_workers)
-        future_map = {}
-        for item in parse_items:
-            p, info, rel, sha, doc_id, ctx, handler = item
-            future_map[rel] = pool.submit(_parse_worker, handler, str(p), ctx)
-        ocr_announced = False
-        parse_results = {}  # batch 模式: 暂存解析结果
 
-        try:
-            for item in parse_items:
-                p, info, rel, sha, doc_id, ctx, handler = item
-                if interrupted:
-                    break
-                try:
-                    parsed, parse_time = future_map[rel].result()
-                    log.info("解析完成: %s (%.1fs)", rel, parse_time)
-                except KeyboardInterrupt:
-                    interrupted = True
-                    break
-                except Exception as ex:
-                    parsed = _parse_failure(p, rel, ex)
-                    errors += 1
-                    parse_time = 0.0
-                    log.info("解析失败: %s", rel)
-                    deferred += 1
-
-                if batch_mode:
-                    parse_results[rel] = (parsed, parse_time)
-                else:
-                    n_ocr = len(_OCR_RE.findall(parsed.get("body", "")))
-                    if n_ocr > 0 and not ocr_announced:
-                        log.info("OCR 模式: 流式 → ThreadPool %d 线程 (低内存, 图数未知)",
-                                 MAX_OCR_THREADS)
-                        ocr_announced = True
-                    if n_ocr > 0:
-                        log.info("OCR: %s, %d 张图片", rel, n_ocr)
-                    try:
-                        status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
-                        if status == "write_fail":
-                            errors += 1
-                        else:
-                            processed += 1
-                    except Exception as ex:
-                        log.error("收尾失败 %s: %s", rel, ex)
-                        errors += 1
-                    del parsed
-                    gc.collect()
-        except KeyboardInterrupt:
-            interrupted = True
-        finally:
-            for f in future_map.values():
-                f.cancel()
-            pool.shutdown(wait=True, cancel_futures=True)
-        _t_parse = time.time() - _ts - _t_scan  # 解析阶段 (扣扫描)
-        _t_ocr_start = time.time()
-
-        # batch 模式: pool 已 shutdown (worker 进程已退出), OCR 不与解析叠加
-        # 即使中断, 仍写出已解析完的文件 (parse_results 只含成功的)
-        if batch_mode:
-            # 计数总 OCR 图数, 决策 OCR 并行模式
-            total_ocr_images = sum(
-                len(_OCR_RE.findall(pr[0].get("body", "")))
-                for pr in parse_results.values())
-            if OCR_MODE is None or OCR_PROCS is None:
-                m, w = _ocr_mode_decision(batch_mode, MAX_OCR_THREADS, _AVAIL_MB, total_ocr_images)
-                if OCR_MODE is None:
-                    OCR_MODE = m
-                if OCR_PROCS is None:
-                    OCR_PROCS = w
-            # 打印决策详情 (一行含模式/数量/判定依据)
-            if total_ocr_images > 0:
-                proc_budget = max(0, (_AVAIL_MB - 1024) // 400)
-                need_by_imgs = total_ocr_images // 10
-                # 自动决策下的“应然”模式 (用于解释; 即使被测试强制也说得清)
-                auto_mode, auto_w = _ocr_mode_decision(
-                    batch_mode, MAX_OCR_THREADS, _AVAIL_MB, total_ocr_images)
-                forced = " (测试强制)" if (OCR_MODE != auto_mode) else ""
-                if OCR_MODE == "process":
-                    log.info(
-                        "OCR 决策: process(%d 进程)%s [Linux+batch+图%d≥50+核%d≥2, "
-                        "worker=min(OCR%d, 图/10=%d, 内存%d) → %d]",
-                        OCR_PROCS, forced, total_ocr_images, _CPUS,
-                        MAX_OCR_THREADS, need_by_imgs, proc_budget, OCR_PROCS)
-                else:
-                    if sys.platform == "win32":
-                        reason = "Windows:spawn开销高"
-                    elif total_ocr_images < 50:
-                        reason = "图%d<50" % total_ocr_images
-                    elif not batch_mode:
-                        reason = "非batch(可用%.1fGB<4GB)" % (_AVAIL_MB / 1024)
-                    elif MAX_OCR_THREADS < 2:
-                        reason = "max_ocr<2"
-                    elif proc_budget < 2:
-                        reason = "内存不足(可容%d进程<2)" % proc_budget
-                    else:
-                        reason = "自动应选process"
-                    log.info(
-                        "OCR 决策: thread(%d 线程)%s [%s; 核%d, 可用%.1fGB, 图%d]",
-                        MAX_OCR_THREADS, forced, reason, _CPUS, _AVAIL_MB / 1024,
-                        total_ocr_images)
-            if total_ocr_images > 0:
-                ocr_unit = "进程" if OCR_MODE == "process" else "线程"
-                ocr_n = OCR_PROCS if OCR_MODE == "process" else MAX_OCR_THREADS
-                log.info("OCR: %d 张图片 (%d %s, %s)...",
-                         total_ocr_images, ocr_n, ocr_unit, OCR_MODE)
-            # ProcessPool: 预创建, 计时
-            if OCR_MODE == "process" and _ocr_pool is None:
-                t_pool = time.time()
-                _ocr_pool = ProcessPoolExecutor(
-                    max_workers=OCR_PROCS, initializer=_ocr_proc_init)
-                log.info("OCR ProcessPool 就绪 (%d worker, %.1fs)",
-                         OCR_PROCS, time.time() - t_pool)
-            # 全局预计算 OCR: 一个池跑完所有文档的所有图片 (消除逐文档并行度空洞)
-            if OCR_MODE == "thread" and total_ocr_images > 0:
-                jobs = []
-                for item in parse_items:
-                    p2, info2, rel2, sha2, doc_id2, ctx2, handler2 = item
-                    if rel2 not in parse_results:
-                        continue
-                    parsed2 = parse_results[rel2][0]
-                    for dest in _OCR_RE.findall(parsed2.get("body", "")):
-                        ap = out / "original-doc" / f"{doc_id2}_assets" / dest[1]
-                        jobs.append((doc_id2, dest[1], str(ap)))
-                ocr_t0 = time.time()
-                try:
-                    _precompute_ocr(jobs, out)
-                except KeyboardInterrupt:
-                    interrupted = True
-                    log.warning("收到中断信号 (OCR 预计算阶段), 保存已处理部分并退出...")
-            else:
-                ocr_t0 = time.time()
-            try:
-                for item in parse_items:
-                    p, info, rel, sha, doc_id, ctx, handler = item
-                    if rel not in parse_results:
-                        continue
-                    parsed, parse_time = parse_results.pop(rel)
-                    try:
-                        status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed, parse_time)
-                        if status == "write_fail":
-                            errors += 1
-                        else:
-                            processed += 1
-                    except Exception as ex:
-                        log.error("收尾失败 %s: %s", rel, ex)
-                        errors += 1
-                    del parsed
-                    gc.collect()
-            except KeyboardInterrupt:
-                interrupted = True
-                log.warning("收到中断信号 (收尾阶段), 保存已处理部分并退出...")
-
-            # OCR 计时汇总
-            if total_ocr_images > 0:
-                ocr_elapsed = time.time() - ocr_t0
-                log.info("OCR 完成: %d 图, %.1fs, %.1f 图/s",
-                         total_ocr_images, ocr_elapsed,
-                         total_ocr_images / ocr_elapsed if ocr_elapsed > 0 else 0)
-            _t_ocr = time.time() - ocr_t0
-
-        if interrupted:
-            log.warning("收到中断信号 (解析/收尾阶段), 保存已处理部分并退出...")
-
-    # shutdown OCR ProcessPool (如有)
-    if _ocr_pool is not None:
-        _ocr_pool.shutdown(wait=True)
-        _ocr_pool = None
-
-    # finalize_items: 无需解析, 直接收尾
-    if not interrupted:
-        try:
-            for item in finalize_items:
-                p, info, rel, sha, doc_id, parsed, _is_err = item
-                try:
-                    status = _finalize(out, move, man, conf, p, info, rel, sha, doc_id, parsed)
-                    if status == "write_fail":
-                        errors += 1
-                    else:
-                        processed += 1
-                except Exception as ex:
-                    log.error("收尾失败 %s: %s", rel, ex)
-                    errors += 1
-        except KeyboardInterrupt:
-            interrupted = True
-            log.warning("收到中断信号 (收尾阶段), 保存已处理部分并退出...")
-
-    # === 阶段 4: 清理 + 保存 + 生成索引 ===
-    if not move:
-        for rp in list(man.entries):
-            if rp in current_rels:
-                continue
-            _prune_entry(man, out, rp, man.entries[rp])
-            purged += 1
-            log.info("清理已删除输入: %s", rp)
-
+def _finalize_no_parse_phase(st):
+    """finalize_items: 无需解析, 直接收尾."""
     try:
-        man.save()
+        for item in st.finalize_items:
+            p, info, rel, sha, doc_id, parsed, _is_err = item
+            _finalize_one(st, p, info, rel, sha, doc_id, parsed)
+    except KeyboardInterrupt:
+        st.interrupted = True
+        log.warning("收到中断信号 (收尾阶段), 保存已处理部分并退出...")
+
+
+def _cleanup_index_phase(st):
+    """阶段 4: 清理已删除输入 + 保存 manifest + 生成索引."""
+    if not st.move:
+        for rp in list(st.man.entries):
+            if rp in st.current_rels:
+                continue
+            _prune_entry(st.man, st.out, rp, st.man.entries[rp])
+            st.purged += 1
+            log.info("清理已删除输入: %s", rp)
+    try:
+        st.man.save()
     except Exception as ex:
         log.error("manifest 保存失败: %s", ex)
     try:
-        catalog.build_catalog(man.values(), out)
-        catalog.build_handoff(man.values(), out)
+        catalog.build_catalog(st.man.values(), st.out)
+        catalog.build_handoff(st.man.values(), st.out)
     except Exception as ex:
         log.error("catalog/handoff 生成失败: %s", ex)
-    log.info("完成: 处理 %d, 跳过 %d, 失败 %d, 清理 %d, 不支持 %d, defer %d (%.1fs)",
-             processed, skipped, errors, purged, unsupported, deferred,
-             time.time() - _t_start)
-    if not interrupted:
-        _total = time.time() - _t_start
-        # OCR 耗时: batch 模式用相位墙钟; 流式/内联用累计器的墙钟跨度
-        _ocr_sum, _ocr_n, _ocr_span = ocr.ocr_stats()
-        _t_ocr_show = max(_t_ocr, _ocr_span)
-        # 图数: 多进程时子进程计数不可见, 用本 run 统计的 total_ocr_images
-        _n_show = max(_ocr_n, total_ocr_images)
-        # 流式模式下 OCR 内联在解析阶段, 从解析中扣除, 避免重叠计
-        _t_parse_show = max(0.0, _t_parse - (_t_ocr_show - _t_ocr))
-        _t_other = max(0.0, _total - _t_scan - _t_parse_show - _t_ocr_show)
-        log.info("阶段耗时: 扫描 %.1fs | 解析 %.1fs | OCR %.1fs (%d 图) | 写出/索引 %.1fs | 总计 %.1fs",
-                 _t_scan, _t_parse_show, _t_ocr_show, _n_show, _t_other, _total)
-    return processed, skipped, errors
+
+
+def _log_phase_timing(st, total):
+    """日志: 分阶段耗时 (扫描/解析/OCR/写出/索引).
+
+    OCR 耗时: batch 模式用相位墙钟; 流式/内联用累计器的墙钟跳度.
+    图数: 多进程时子进程计数不可见, 用本 run 统计的 total_ocr_images.
+    流式模式下 OCR 内联在解析阶段, 从解析中扣除, 避免重叠计.
+    """
+    _ocr_sum, _ocr_n, _ocr_span = ocr.ocr_stats()
+    t_ocr_show = max(st.t_ocr, _ocr_span)
+    n_show = max(_ocr_n, st.total_ocr_images)
+    t_parse_show = max(0.0, st.t_parse - (t_ocr_show - st.t_ocr))
+    t_other = max(0.0, total - st.t_scan - t_parse_show - t_ocr_show)
+    log.info("阶段耗时: 扫描 %.1fs | 解析 %.1fs | OCR %.1fs (%d 图) | 写出/索引 %.1fs | 总计 %.1fs",
+             st.t_scan, t_parse_show, t_ocr_show, n_show, t_other, total)
+
+
+def _parse_finalize_phase(st, batch_mode):
+    """阶段 2+3: 并行解析 + 收尾 (含 OCR 预计算/写出).
+
+    batch (≥4GB): 全部解析 → shutdown pool → OCR. worker 与 OCR 不重叠, CPU 不叠加.
+    streaming (<4GB): 解析一个 → 立即 OCR+写出+gc. 低内存安全, 1 worker 不叠加.
+    """
+    global OCR_MODE, OCR_PROCS, _ocr_pool
+    in_dir, out, move = st.in_dir, st.out, st.move
+    man, conf = st.man, st.conf
+    parse_items = st.parse_items
+    max_workers = min(MAX_WORKERS, len(parse_items))
+    log.info("解析 %d 个文件 (%d 进程, %s)...", len(parse_items), max_workers,
+             "批量" if batch_mode else "流式")
+    pool = ProcessPoolExecutor(max_workers=max_workers)
+    future_map = {}
+    for item in parse_items:
+        p, info, rel, sha, doc_id, ctx, handler = item
+        future_map[rel] = pool.submit(_parse_worker, handler, str(p), ctx)
+    ocr_announced = False
+    parse_results = {}  # batch 模式: 暂存解析结果
+
+    _ts = time.time()
+    try:
+        for item in parse_items:
+            p, info, rel, sha, doc_id, ctx, handler = item
+            if st.interrupted:
+                break
+            try:
+                parsed, parse_time = future_map[rel].result()
+                log.info("解析完成: %s (%.1fs)", rel, parse_time)
+            except KeyboardInterrupt:
+                st.interrupted = True
+                break
+            except Exception as ex:
+                parsed = _parse_failure(p, rel, ex)
+                st.errors += 1
+                parse_time = 0.0
+                log.info("解析失败: %s", rel)
+                st.deferred += 1
+
+            if batch_mode:
+                parse_results[rel] = (parsed, parse_time)
+            else:
+                n_ocr = len(_OCR_RE.findall(parsed.get("body", "")))
+                if n_ocr > 0 and not ocr_announced:
+                    log.info("OCR 模式: 流式 → ThreadPool %d 线程 (低内存, 图数未知)",
+                             MAX_OCR_THREADS)
+                    ocr_announced = True
+                if n_ocr > 0:
+                    log.info("OCR: %s, %d 张图片", rel, n_ocr)
+                _finalize_one(st, p, info, rel, sha, doc_id, parsed, parse_time)
+                del parsed
+                gc.collect()
+    except KeyboardInterrupt:
+        st.interrupted = True
+    finally:
+        for f in future_map.values():
+            f.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+    st.t_parse = time.time() - _ts  # 解析阶段 (仅本次并行解析)
+    ocr_t0 = time.time()
+
+    # batch 模式: pool 已 shutdown (worker 进程已退出), OCR 不与解析叠加
+    # 即使中断, 仍写出已解析完的文件 (parse_results 只含成功的)
+    if batch_mode:
+        # 计数总 OCR 图数, 决策 OCR 并行模式
+        st.total_ocr_images = sum(
+            len(_OCR_RE.findall(pr[0].get("body", "")))
+            for pr in parse_results.values())
+        if OCR_MODE is None or OCR_PROCS is None:
+            m, w = _ocr_mode_decision(batch_mode, MAX_OCR_THREADS, _AVAIL_MB, st.total_ocr_images)
+            if OCR_MODE is None:
+                OCR_MODE = m
+            if OCR_PROCS is None:
+                OCR_PROCS = w
+        _log_ocr_decision(batch_mode, st.total_ocr_images)
+        # ProcessPool: 预创建, 计时
+        if OCR_MODE == "process" and _ocr_pool is None:
+            t_pool = time.time()
+            _ocr_pool = ProcessPoolExecutor(
+                max_workers=OCR_PROCS, initializer=_ocr_proc_init)
+            log.info("OCR ProcessPool 就绪 (%d worker, %.1fs)",
+                     OCR_PROCS, time.time() - t_pool)
+        # 全局预计算 OCR: 一个池跑完所有文档的所有图片 (消除逐文档并行度空洞)
+        if OCR_MODE == "thread" and st.total_ocr_images > 0:
+            jobs = []
+            for item in parse_items:
+                p2, info2, rel2, sha2, doc_id2, ctx2, handler2 = item
+                if rel2 not in parse_results:
+                    continue
+                parsed2 = parse_results[rel2][0]
+                for dest in _OCR_RE.findall(parsed2.get("body", "")):
+                    ap = out / "original-doc" / f"{doc_id2}_assets" / dest[1]
+                    jobs.append((doc_id2, dest[1], str(ap)))
+            ocr_t0 = time.time()
+            try:
+                _precompute_ocr(jobs, out)
+            except KeyboardInterrupt:
+                st.interrupted = True
+                log.warning("收到中断信号 (OCR 预计算阶段), 保存已处理部分并退出...")
+        try:
+            for item in parse_items:
+                p, info, rel, sha, doc_id, ctx, handler = item
+                if rel not in parse_results:
+                    continue
+                parsed, parse_time = parse_results.pop(rel)
+                _finalize_one(st, p, info, rel, sha, doc_id, parsed, parse_time)
+                del parsed
+                gc.collect()
+        except KeyboardInterrupt:
+            st.interrupted = True
+            log.warning("收到中断信号 (收尾阶段), 保存已处理部分并退出...")
+
+        # OCR 计时汇总
+        if st.total_ocr_images > 0:
+            ocr_elapsed = time.time() - ocr_t0
+            log.info("OCR 完成: %d 图, %.1fs, %.1f 图/s",
+                     st.total_ocr_images, ocr_elapsed,
+                     st.total_ocr_images / ocr_elapsed if ocr_elapsed > 0 else 0)
+        st.t_ocr = time.time() - ocr_t0
+
+    if st.interrupted:
+        log.warning("收到中断信号 (解析/收尾阶段), 保存已处理部分并退出...")
+
+
+def _log_ocr_decision(batch_mode, total_ocr_images):
+    """日志: OCR 并行决策详情 (一行含模式/数量/判定依据)."""
+    if total_ocr_images <= 0:
+        return
+    proc_budget = max(0, (_AVAIL_MB - 1024) // 400)
+    need_by_imgs = total_ocr_images // 10
+    # 自动决策下的“应然”模式 (用于解释; 即使被测试强制也说得清)
+    auto_mode, auto_w = _ocr_mode_decision(
+        batch_mode, MAX_OCR_THREADS, _AVAIL_MB, total_ocr_images)
+    forced = " (测试强制)" if (OCR_MODE != auto_mode) else ""
+    if OCR_MODE == "process":
+        log.info(
+            "OCR 决策: process(%d 进程)%s [Linux+batch+图%d≥50+核%d≥2, "
+            "worker=min(OCR%d, 图/10=%d, 内存%d) → %d]",
+            OCR_PROCS, forced, total_ocr_images, _CPUS,
+            MAX_OCR_THREADS, need_by_imgs, proc_budget, OCR_PROCS)
+    else:
+        if sys.platform == "win32":
+            reason = "Windows:spawn开销高"
+        elif total_ocr_images < 50:
+            reason = "图%d<50" % total_ocr_images
+        elif not batch_mode:
+            reason = "非batch(可用%.1fGB<4GB)" % (_AVAIL_MB / 1024)
+        elif MAX_OCR_THREADS < 2:
+            reason = "max_ocr<2"
+        elif proc_budget < 2:
+            reason = "内存不足(可容%d进程<2)" % proc_budget
+        else:
+            reason = "自动应选process"
+        log.info(
+            "OCR 决策: thread(%d 线程)%s [%s; 核%d, 可用%.1fGB, 图%d]",
+            MAX_OCR_THREADS, forced, reason, _CPUS, _AVAIL_MB / 1024,
+            total_ocr_images)
+    ocr_unit = "进程" if OCR_MODE == "process" else "线程"
+    ocr_n = OCR_PROCS if OCR_MODE == "process" else MAX_OCR_THREADS
+    log.info("OCR: %d 张图片 (%d %s, %s)...",
+             total_ocr_images, ocr_n, ocr_unit, OCR_MODE)

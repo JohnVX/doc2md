@@ -9,7 +9,7 @@
 from pathlib import Path
 
 from .. import util
-from ._common import defer, is_placeholder, md_table
+from ._common import defer, is_placeholder, render_table
 
 
 def parse(path, ctx=None):
@@ -111,7 +111,7 @@ def _render_slide(idx, slide, ctx, deferred):
                 items.append(txt)
             handled = True
         if sh.has_table:
-            items.append(_render_table(sh.table))
+            items.append(render_table(sh.table))
             handled = True
         try:
             if sh.shape_type == 13:  # PICTURE
@@ -162,23 +162,6 @@ def _fmt_textframe(tf):
         else:
             out.append(t)
     return "\n".join(out)
-
-
-def _render_table(tbl):
-    """渲染 pptx 表格为 md 表格."""
-    try:
-        ncols = len(tbl.columns)
-    except Exception:
-        ncols = max((len(r.cells) for r in tbl.rows), default=0)
-    if ncols < 1 or not tbl.rows:
-        return ""
-    rows = []
-    for r in tbl.rows:
-        # 不在此转义: 提取原始文本, 转义统一由 md_table 的 esc 处理
-        # (避免 | 被双重转义 => \\\|)
-        cells = [c.text for c in r.cells]
-        rows.append(cells)
-    return md_table(rows, ncols)
 
 
 def _handle_picture(sh, no, ctx, items, deferred):
