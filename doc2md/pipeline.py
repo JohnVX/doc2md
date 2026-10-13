@@ -116,6 +116,49 @@ def _get_affinity_count():
     return None
 
 
+def _probe_avail_mb():
+    """返回可用物理内存 MB (psutil → 平台 API → 2048 保守默认)."""
+    avail_mb = 2048  # 保守默认
+    try:
+        import psutil
+        avail_mb = psutil.virtual_memory().available // (1024 * 1024)
+        return avail_mb
+    except ImportError:
+        pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            class _MemStatus(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            ms = _MemStatus()
+            ms.dwLength = ctypes.sizeof(ms)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
+            avail_mb = ms.ullAvailPhys // (1024 * 1024)
+        except Exception:
+            pass
+    else:
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        avail_mb = int(line.split()[1]) // 1024
+                        break
+        except Exception:
+            pass
+    return avail_mb
+
+
 def _detect_resources():
     """嗅探硬件 + 设置系统级限制, 返回 (max_workers, max_ocr, cpus, avail_mb, batch_mode).
 
@@ -130,41 +173,7 @@ def _detect_resources():
     """
     raw_cpus = os.cpu_count() or 2
 
-    avail_mb = 2048  # 保守默认
-    try:
-        import psutil
-        avail_mb = psutil.virtual_memory().available // (1024 * 1024)
-    except ImportError:
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                class _MemStatus(ctypes.Structure):
-                    _fields_ = [
-                        ("dwLength", ctypes.c_ulong),
-                        ("dwMemoryLoad", ctypes.c_ulong),
-                        ("ullTotalPhys", ctypes.c_ulonglong),
-                        ("ullAvailPhys", ctypes.c_ulonglong),
-                        ("ullTotalPageFile", ctypes.c_ulonglong),
-                        ("ullAvailPageFile", ctypes.c_ulonglong),
-                        ("ullTotalVirtual", ctypes.c_ulonglong),
-                        ("ullAvailVirtual", ctypes.c_ulonglong),
-                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-                    ]
-                ms = _MemStatus()
-                ms.dwLength = ctypes.sizeof(ms)
-                ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
-                avail_mb = ms.ullAvailPhys // (1024 * 1024)
-            except Exception:
-                pass
-        else:
-            try:
-                with open("/proc/meminfo") as f:
-                    for line in f:
-                        if line.startswith("MemAvailable:"):
-                            avail_mb = int(line.split()[1]) // 1024
-                            break
-            except Exception:
-                pass
+    avail_mb = _probe_avail_mb()
 
     log.info("硬件: %d 核 / %.1fGB 可用", raw_cpus, avail_mb / 1024)
 
@@ -611,7 +620,9 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
     _ocr_text_cache = {}  # 每轮清空 (防上次残留)
     ocr.reset_ocr_stats()  # 清零累计 OCR 耗时 (本进程)
     if MAX_WORKERS is None or MAX_OCR_THREADS is None or BATCH_MODE is None:
-        dw, dt, cpus, _CPUS, batch_mode = _detect_resources()
+        dw, dt, cpus, avail_mb_auto, batch_mode = _detect_resources()
+        _CPUS = cpus
+        _AVAIL_MB = avail_mb_auto
         if MAX_WORKERS is None:
             MAX_WORKERS = dw
         if MAX_OCR_THREADS is None:
@@ -619,9 +630,11 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
         if BATCH_MODE is None:
             BATCH_MODE = batch_mode
     else:
+        # 测试强制了并行参数: 不重新嗅探/设限, 但抓真实核数/内存供日志
         _CPUS = _CPUS or (os.cpu_count() or 1)
-    batch_mode = BATCH_MODE
-    _AVAIL_MB = _AVAIL_MB or 0
+        if not _AVAIL_MB:
+            _AVAIL_MB = _probe_avail_mb()
+    batch_mode = BATCH_MODE  # noqa: F841
 
     # 阶段计时 (结束时汇总)
     _t_scan = _t_parse = _t_ocr = 0.0
