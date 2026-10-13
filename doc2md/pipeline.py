@@ -668,6 +668,7 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
         log.warning("输入目录为空, 无文件可处理: %s", in_dir)
 
     processed = skipped = errors = unsupported = purged = deferred = 0
+    total_ocr_images = 0  # 本 run 的 OCR 图总数 (汇总用; 多进程下子进程计数不可见)
     parse_items = []   # (p, info, rel, sha, doc_id, ctx, handler) — 需并行解析
     finalize_items = []  # (p, info, rel, sha, doc_id, parsed, is_error) — 无需解析, 直接收尾
 
@@ -946,9 +947,11 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
         # OCR 耗时: batch 模式用相位墙钟; 流式/内联用累计器的墙钟跨度
         _ocr_sum, _ocr_n, _ocr_span = ocr.ocr_stats()
         _t_ocr_show = max(_t_ocr, _ocr_span)
+        # 图数: 多进程时子进程计数不可见, 用本 run 统计的 total_ocr_images
+        _n_show = max(_ocr_n, total_ocr_images)
         # 流式模式下 OCR 内联在解析阶段, 从解析中扣除, 避免重叠计
         _t_parse_show = max(0.0, _t_parse - (_t_ocr_show - _t_ocr))
         _t_other = max(0.0, _total - _t_scan - _t_parse_show - _t_ocr_show)
         log.info("阶段耗时: 扫描 %.1fs | 解析 %.1fs | OCR %.1fs (%d 图) | 写出/索引 %.1fs | 总计 %.1fs",
-                 _t_scan, _t_parse_show, _t_ocr_show, _ocr_n, _t_other, _total)
+                 _t_scan, _t_parse_show, _t_ocr_show, _n_show, _t_other, _total)
     return processed, skipped, errors
