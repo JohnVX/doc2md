@@ -6,6 +6,7 @@
 用法: python tests/diag_win_detdiff.py <original-doc目录>
   环境变量 DIAG_STRIDE=6 抽样.
 """
+import difflib
 import os
 import sys
 import time
@@ -92,7 +93,7 @@ def main():
 
     # --- 逐图对比 ---
     print("=" * 72)
-    print("逐图差异 (736 -> 384 丢失/变化的文字):")
+    print("逐图差异 (736 -> 384):")
     r736 = {n: (t, l, e) for n, t, l, e in results[736]}
     r384 = {n: (t, l, e) for n, t, l, e in results[384]}
     lost_chars = gained_chars = 0
@@ -111,6 +112,19 @@ def main():
               (name, l36, l84, dl, len(t36), len(t84), dc))
         if e36 or e84:
             print("     err736=%r err384=%r" % (e36, e84))
+        # 打印具体差异 (384 相对 736 丢了/变了什么)
+        sm = difflib.SequenceMatcher(None, t36, t84)
+        for op, i1, i2, j1, j2 in sm.get_opcodes():
+            if op == "equal":
+                continue
+            old = t36[i1:i2]
+            new = t84[j1:j2]
+            if op == "delete":
+                print("     - 736独有(384丢失): %r" % old)
+            elif op == "insert":
+                print("     + 384新增: %r" % new)
+            else:  # replace
+                print("     ~ 736[%r] -> 384[%r]" % (old, new))
     print("-" * 72)
     print("变化图: %d/%d; 净字符变化: %+d (丢 %d, 增 %d)" %
           (changed_imgs, len(pairs), gained_chars - lost_chars, lost_chars, gained_chars))
