@@ -9,6 +9,7 @@ DEFER_TYPES = frozenset({
     "formula",       # 数学公式(OMML)未提取
     "chart",         # 图表/SmartArt 未提取
     "formula-cell",  # xlsx 公式单元格无缓存值(已回退显示公式文本, 需复核)
+    "truncated",     # xlsx 大表超出行列上限(已截断, 需查原件)
     "encrypted",     # 加密文档
     "unsupported",   # stage1 不支持的格式
     "parse-failed",  # 解析失败

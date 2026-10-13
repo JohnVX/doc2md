@@ -49,7 +49,7 @@ CASES.append(("pdf_table_extracted", test_pdf_table_extracted))
 
 
 def test_xlsx_row_truncation():
-    """xlsx 超 300 行 -> 截断 + 提示."""
+    """xlsx 超 2000 行 -> 截断 + stage2:truncated defer (结构化上报)."""
     import openpyxl
     import tempfile
     tmp = tempfile.mkdtemp()
@@ -58,7 +58,7 @@ def test_xlsx_row_truncation():
     ws = wb.active
     ws.title = "BigSheet"
     ws.append(["c0", "c1", "c2"])
-    for i in range(400):
+    for i in range(2100):
         ws.append([f"r{i}c0", f"r{i}c1", f"r{i}c2"])
     wb.save(xlsx_p)
     wb.close()
@@ -68,7 +68,14 @@ def test_xlsx_row_truncation():
         _, _, e = pipeline.run(in_dir, out)
         assert_eq(e, 0)
         body = open(find_mds(out)[0], encoding="utf-8").read()
-        assert_true("截断" in body, "应有截断提示")
+        assert_true("stage2:truncated" in body, "应有 truncated 标记")
+        # 结构化上报: catalog 该文档应含 truncated defer (stage2 可见)
+        import yaml
+        cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"),
+                                  encoding="utf-8"))
+        dtypes = {d["type"] for doc in cat["documents"]
+                  for d in (doc.get("deferred") or [])}
+        assert_true("truncated" in dtypes, "truncated 应进 catalog.deferred")
         cleanup(in_dir, out)
     finally:
         cleanup(tmp)

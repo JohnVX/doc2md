@@ -80,6 +80,11 @@ _HANDOFF_STATIC = {
             "source": "original-doc/<relpath> (xlsx 原件)",
             "action": "复核公式计算结果, 更新已回退显示的公式文本",
         },
+        "truncated": {
+            "where": "md body 中 <!-- stage2:truncated=N --> 标记 (位于被截断的 sheet 表格之后)",
+            "source": "original-doc/<relpath> (xlsx 原件)",
+            "action": "该 sheet 行列超过上限(行2000/列100)已截断, 需读原件补全或改用结构化提取",
+        },
         "encrypted": {
             "where": "md body 中 <!-- stage2:encrypted=1 --> 标记 (整篇占位)",
             "source": "original-doc/<relpath> (加密原件)",

@@ -217,7 +217,7 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 
 ### handoff.yaml — 交接说明 + 工作单
 
-面向**仅 stage2 agent**。读此一处即获取全部：producer 身份、stage1 做了/没做什么、9 种 defer 类型的处理契约（where/source/action）、6 步操作流程、`stage2_pending` 具体工作项、四处同步更新指南。
+面向**仅 stage2 agent**。读此一处即获取全部：producer 身份、stage1 做了/没做什么、10 种 defer 类型的处理契约（where/source/action）、6 步操作流程、`stage2_pending` 具体工作项、四处同步更新指南。
 
 ### front-matter
 
@@ -227,7 +227,7 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 
 ## 六、Deferred 交接协议
 
-9 种 defer 类型，每种含 where（标记与原件定位）/ source（原件在哪）/ action（该做什么）：
+10 种 defer 类型，每种含 where（标记与原件定位）/ source（原件在哪）/ action（该做什么）：
 
 | type | 含义 |
 |------|------|
@@ -237,6 +237,7 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 | `formula` | 数学公式 (OMML) 未提取 |
 | `chart` | 图表/SmartArt 未提取 |
 | `formula-cell` | xlsx 公式单元格无缓存值（已回退显示公式文本，需复核） |
+| `truncated` | xlsx sheet 行列超过上限（行 2000/列 100）已截断，需查原件补全 |
 | `encrypted` | 加密文档 |
 | `unsupported` | stage1 不支持的格式 |
 | `parse-failed` | 解析失败 |
@@ -486,11 +487,13 @@ stage 1 原则：**确定性工作总是有益、对后续无害**。
 - 旧二进制 office 及其它不支持格式 → 复制原件 + defer 标记
 - docx 公式/图表/SmartArt、pptx 非文本图形 → 检测到即标记
 - xlsx 无缓存值公式单元格 → 回退显示公式文本 + 复核标记
+- xlsx 超长/超宽 sheet（行 > 2000 或列 > 100）→ 截断 + `truncated` defer（结构化上报，交 stage2 查原件）
 - 解析失败/加密 → 占位 md 指向原件
 
 **已知精度限制（不丢字、只影响结构/顺序，原件可回看）：**
 - PDF 复杂多栏版面：文字都在，多栏阅读序可能错乱
 - docx 修订/批注/footnotes/页眉页脚：未提取
+- xlsx 单 sheet 超 2000 行或 100 列：截断（已 defer 标记，见上），stage2 读原件补全
 - 极少数混合编码文本可能需复核
 
 ### 产物质量修复（真实资料检查中发现并修复）

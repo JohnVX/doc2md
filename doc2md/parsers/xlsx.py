@@ -2,7 +2,7 @@
 
 通用: data_only 取缓存值; 无缓存值的公式单元格回退显示公式文本(不显示成空);
 合并单元格展开填满跨度(zip 解析 sheet XML 取 mergeCell, 不整书载入);
-截断超长行(300)/列(40); 跳过空 sheet.
+截断超长行(2000)/列(100) 并结构化 defer(交 stage2 查原件); 跳过空 sheet.
 """
 import warnings
 
@@ -13,8 +13,8 @@ from pathlib import Path
 
 from ._common import defer, md_table
 
-MAX_ROWS = 300
-MAX_COLS = 40
+MAX_ROWS = 2000
+MAX_COLS = 100
 
 
 def _load_formula_map(path):
@@ -166,12 +166,22 @@ def parse(path, ctx=None):
         if not rows:
             continue
         out.append(f"### Sheet: {ws.title}")
-        if ncols > MAX_COLS:
+        col_trunc = ncols > MAX_COLS
+        if col_trunc:
             rows = [r[:MAX_COLS] + ["…"] for r in rows]
             ncols = MAX_COLS + 1
         out.append(md_table(rows, ncols))
-        if truncated:
-            out.append(f"_（行数超过 {MAX_ROWS}，已截断）_")
+        # 截断结构化上报 (进 deferred/catalog/handoff, 不只写在正文里),
+        # 否则 stage2 从交接单看不到该 sheet 被截, 会漏处理大表.
+        if truncated and col_trunc:
+            out.append(defer(deferred, "truncated", 1,
+                             f"sheet '{ws.title}' 行数超 {MAX_ROWS} 且列数超 {MAX_COLS}, 已截断"))
+        elif truncated:
+            out.append(defer(deferred, "truncated", 1,
+                             f"sheet '{ws.title}' 行数超 {MAX_ROWS}, 已截断"))
+        elif col_trunc:
+            out.append(defer(deferred, "truncated", 1,
+                             f"sheet '{ws.title}' 列数超 {MAX_COLS}, 已截断"))
         if formula_count:
             out.append(defer(deferred, "formula-cell", formula_count,
                              "无缓存值, 已回退显示公式文本, 见原文件复核"))
