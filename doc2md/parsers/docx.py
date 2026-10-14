@@ -5,7 +5,14 @@
   - 表格 -> md 表格; 表格单元格内的图片也提取
   - 段落内嵌图(含纯图段落) -> 提取 blob -> 存 assets -> OCR 占位(收尾执行)
   - 浮动文本框 (w:txbxContent) -> 扫描 XML 提取文字附在末尾
+  - 脚注/尾注/批注 -> 读 zip 内独立 part (word/footnotes|endnotes|comments.xml) 提取
   - 公式(OMML)/图表/SmartArt -> 检测到即标记 stage2(文本框不计, 其文字已提取)
+
+有意不提取 (无实质内容/语义无关, 不标记也不交 stage2):
+  - 页眉/页脚: 多为页码/公司名/文档名样板, 提取与去噪目标矛盾
+  - 删除修订(w:delText): 内容已作废; 插入修订(w:ins)的文字已随正文提取
+  - 域字段(页码/目录域): 占位符, 实际值由 Word 渲染, 无原文
+  - 隐藏文字(w:vanish): 作者主动隐藏, 不应入正文
 """
 import re
 from pathlib import Path
@@ -54,6 +61,20 @@ def parse(path, ctx=None):
     if txbx:
         out.append("### 浮动文本框内容")
         out.extend(txbx)
+    # 脚注/尾注: body 之外的独立 part, python-docx 无 API, 读 zip 内 XML
+    fn = _extract_notes(path, "footnotes", "脚注")
+    en = _extract_notes(path, "endnotes", "尾注")
+    if fn:
+        out.append("### 脚注")
+        out.extend(fn)
+    if en:
+        out.append("### 尾注")
+        out.extend(en)
+    # 批注: 审阅信息, 独立 part (word/comments.xml)
+    cm = _extract_comments(path)
+    if cm:
+        out.append("### 批注")
+        out.extend(cm)
     # 诚实标记: 检测到但未提取的内容(公式/图表/SmartArt), 留给 stage2
     _detect_unextracted(d, deferred, out)
 
@@ -238,3 +259,66 @@ def _detect_unextracted(d, deferred, out):
         n_graphic = 0
     if n_graphic:
         out.append(defer(deferred, "chart", n_graphic, "图表/SmartArt等图形未提取"))
+
+
+# --- 脚注/尾注/批注: body 之外的独立 part, python-docx 无读取 API, 读 zip 内 XML ---
+# 共享 XOR 无关, 用标准命名空间直接解析. 只取正文文字, 丢弃分隔符等非内容 entry.
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _part_xml(path, name):
+    """读 docx(zip) 内某 part 的字节, 不存在返回 None."""
+    try:
+        import zipfile
+        with zipfile.ZipFile(path) as z:
+            if name in z.namelist():
+                return z.read(name)
+    except Exception:
+        pass
+    return None
+
+
+def _extract_notes(path, part, label):
+    """提取脚注/尾注: word/footnotes.xml | endnotes.xml.
+
+    只取真正的 note (footnote/endnote), 跳过 separator/continuationSeparator
+    (无实质内容的分隔符 entry). id 为序号标识, 正文引用处不重复展开.
+    """
+    blob = _part_xml(path, "word/%s.xml" % part)
+    if not blob:
+        return []
+    try:
+        from xml.etree import ElementTree as ET
+        root = ET.fromstring(blob)
+    except Exception:
+        return []
+    tag = "footnote" if part == "footnotes" else "endnote"
+    out = []
+    for el in root.iter("{%s}%s" % (_W_NS, tag)):
+        # separator / continuationSeparator 无文字, _elems_text 自会跳过
+        txt = "".join((t.text or "") for t in el.iter("{%s}t" % _W_NS)).strip()
+        if txt and not is_placeholder(txt):
+            out.append(txt)
+    return out
+
+
+def _extract_comments(path):
+    """提取批注: word/comments.xml. 含作者时标注, 便于 stage2 区分审阅意见."""
+    blob = _part_xml(path, "word/comments.xml")
+    if not blob:
+        return []
+    try:
+        from xml.etree import ElementTree as ET
+        root = ET.fromstring(blob)
+    except Exception:
+        return []
+    out = []
+    for c in root.iter("{%s}comment" % _W_NS):
+        txt = "".join((t.text or "") for t in c.iter("{%s}t" % _W_NS)).strip()
+        if not txt or is_placeholder(txt):
+            continue
+        author = (c.get("{%s}author" % _W_NS) or "").strip()
+        who = " ".join(author.split())
+        out.append("[%s] %s" % (who, txt) if who else txt)
+    return out

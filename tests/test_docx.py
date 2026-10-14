@@ -93,3 +93,83 @@ def test_image_only_paragraph_extracted():
 
 
 CASES.append(("image_only_paragraph_extracted", test_image_only_paragraph_extracted))
+
+
+def test_footnote_endnote_comment_extracted():
+    """脚注/尾注/批注(独立 part, python-docx 无 API)应被提取; 分隔符条目跳过."""
+    import zipfile
+    from docx import Document
+    in_dir = make_tmp_input()
+    p = os.path.join(in_dir, "notes.docx")
+    d = Document()
+    d.add_paragraph("正文段落")
+    d.save(p)
+
+    # 直接改写 zip: 追加 footnotes/endnotes/comments part + 正文引用
+    data = {}
+    with zipfile.ZipFile(p) as z:
+        for n in z.namelist():
+            data[n] = z.read(n)
+    doc = data["word/document.xml"].decode("utf-8").replace(
+        "</w:body>",
+        '<w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p></w:body>')
+    data["word/document.xml"] = doc.encode("utf-8")
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    data["word/footnotes.xml"] = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:footnotes xmlns:w="{W}">'
+        '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
+        '<w:footnote w:id="1"><w:p><w:r><w:t>FN_MARKER_11</w:t></w:r></w:p></w:footnote>'
+        '</w:footnotes>').encode("utf-8")
+    data["word/endnotes.xml"] = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:endnotes xmlns:w="{W}">'
+        '<w:endnote w:id="1"><w:p><w:r><w:t>EN_MARKER_22</w:t></w:r></w:p></w:endnote>'
+        '</w:endnotes>').encode("utf-8")
+    data["word/comments.xml"] = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:comments xmlns:w="{W}">'
+        '<w:comment w:id="0" w:author="Reviewer"><w:p><w:r><w:t>CM_MARKER_33</w:t></w:r></w:p></w:comment>'
+        '</w:comments>').encode("utf-8")
+    ct = data["[Content_Types].xml"].decode("utf-8").replace(
+        "</Types>",
+        '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>'
+        '<Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>'
+        '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>'
+        "</Types>")
+    data["[Content_Types].xml"] = ct.encode("utf-8")
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, b in data.items():
+            z.writestr(n, b)
+
+    out = make_tmp_output()
+    _, _, e = pipeline.run(in_dir, out)
+    assert_eq(e, 0, "run 应成功")
+    txt = find_md_by_source(out, "original-doc/notes.docx")
+    assert_true("FN_MARKER_11" in txt, "脚注应提取")
+    assert_true("EN_MARKER_22" in txt, "尾注应提取")
+    assert_true("CM_MARKER_33" in txt, "批注应提取")
+    assert_true("Reviewer" in txt, "批注作者应标注")
+    cleanup(in_dir, out)
+
+
+CASES.append(("footnote_endnote_comment_extracted", test_footnote_endnote_comment_extracted))
+
+
+def test_docx_without_notes_has_no_empty_section():
+    """无脚注/尾注/批注时不产生空小节标题."""
+    from docx import Document
+    in_dir = make_tmp_input()
+    d = Document()
+    d.add_paragraph("只有正文")
+    d.save(os.path.join(in_dir, "plain.docx"))
+    out = make_tmp_output()
+    _, _, e = pipeline.run(in_dir, out)
+    assert_eq(e, 0)
+    txt = find_md_by_source(out, "original-doc/plain.docx")
+    for h in ("### 脚注", "### 尾注", "### 批注"):
+        assert_true(h not in txt, f"无内容不应出现 {h}")
+    cleanup(in_dir, out)
+
+
+CASES.append(("docx_without_notes_no_empty_section", test_docx_without_notes_has_no_empty_section))
