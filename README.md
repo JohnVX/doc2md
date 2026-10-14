@@ -174,7 +174,9 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 
 **决策**：`doc-id = "doc-" + sha256(源文件相对路径)[:8]`。
 
-**理由**：用相对路径而非绝对路径——跨平台稳定（Windows `\` vs Linux `/` 已统一）。用路径而非内容哈希——同路径重跑 doc-id 不变，增量跳过可靠。截取 8 位足够区分，短且可读。
+**理由**：相对路径经 `/` 归一（`\` vs `/` 已统一）后再哈希，跨平台同文件产出相同 doc-id，产物路径（md 文件名 / assets 目录名 / catalog `id`）稳定，重跑可原位覆盖、不产生重复文件。截取 8 位足够区分，短且可读。
+
+> **与增量跳过无关**：跳过判断由 manifest 的 **relpath 作键 + sha256 比对**保证（`is_unchanged`，见 4.7 / 八节），不依赖 doc-id。doc-id 只用路径哈希、**不看内容**，故内容变而路径不变时 doc-id 不变，由 sha256 触发重处理。
 
 ### 4.9 Deferred 三重表达
 
@@ -448,7 +450,7 @@ rec 单独并发本已达 8.73x。
 pip install -r requirements.txt
 ```
 
-跨平台（Linux / Windows / macOS，Python 3.9+），全部为预编译 wheel，无需编译器：
+**支持平台：Linux / Windows（Python 3.9+）**。macOS 不保证可用——系统级资源限制（CPU 亲和性 / 内存硬上限）仅在 Linux（`sched_setaffinity` + `RLIMIT_AS`）和 Windows（`SetProcessAffinityMask` + Job Object）实现，macOS 无对应分支。依赖均为预编译 wheel，无需编译器：
 
 | 库 | 用途 |
 |------|------|
@@ -462,6 +464,8 @@ pip install -r requirements.txt
 无 tesseract / pandoc / libreoffice / torch / paddle——都不需要。
 
 **Windows**：用 `python`（非 `python3`）；CLI 自动重配 stdout/stderr 为 utf-8；输出统一 LF 行尾；doc-id 跨平台稳定。
+
+**macOS**：不在支持范围。可尝试运行，但**无系统级资源限制**——CPU 亲和性、内存硬上限均不生效，且代码中无 darwin 分支，行为未经验证。
 
 ---
 
@@ -496,21 +500,11 @@ stage 1 原则：**确定性工作总是有益、对后续无害**。
 - xlsx 单 sheet 超 2000 行或 100 列：截断（已 defer 标记，见上），stage2 读原件补全
 - 极少数混合编码文本可能需复核
 
-### 产物质量修复（真实资料检查中发现并修复）
+### 产物质量修复
 
-对真实产物做逐项审查（含逐张读图核对）后修复的确定性缺陷（均不损精度、不影响性能）：
+对真实产物逐项审查后，修复了一批确定性缺陷（表格换行转义、PDF 标题可信度判据、跨页页眉/水印剔除、装饰形状不计 defer、纯表格摘要）：均不损精度、不影响性能，细节见各实现处的就地注释（`parsers/_common.py`、`parsers/pdf.py`、`parsers/pptx.py`、`util.pick_title`、`pipeline.extract_summary`）。
 
-| 缺陷 | 根因 | 修法 |
-|---|---|---|
-| PPT 表格行被拆断 | 单元格内换行为 `\x0b`(VT)，而 `md_table`/`_render_table` 只转义 `\n`；`clean_text` 用 `splitlines()` 又把 `\x0b` 当行界 | 转义覆盖 `\x0b/\x0c`；`clean_text` 改 `split("\n")`；转义统一在 `md_table.esc` 一处（顺带消除 `\|` 双重转义） |
-| PPT 导出的 PDF 标题为「幻灯片 1」 | PDF 元数据 title 不可信，`is_generic_title` 未收录此类占位 | `pick_title` 加**内容一致性判据**：元数据标题须出现在正文中，否则回退文件名（不枚举占位符） |
-| PDF 页眉水印污染正文/表格 | 该 PDF 每页有页眉水印；且水印与表格 bbox 重叠时，`find_tables().extract()` 把水印字符混入单元格（`g_aaaBbb` → `g aaaBbb _`，下划线错位） | ①**跨页样板检测**：`(文字, bbox)` 在 ≥60% 页完全相同 → 判定页眉/页脚/水印并跳过（不枚举具体文字；仅含样板的页视为空页，不误渲染为扫描页）；②表格单元格改用 **words 重建**（只取完全落在单元格内的 word，再以**同格高度中位数 × 3.5** 滤旋转水印——自适应字号，不误删大字号表头） |
-| 箭头连接符被计入 `chart` defer | `LINE`(连接符)/`FREEFORM` 无内容载体，却计入未处理形状 | `chart` defer 排除 `LINE`/`FREEFORM`；保留 `CHART`/`EMBEDDED_OLE_OBJECT` 等真内容载体 |
-| 纯表格 xlsx 的 `summary` 为空 | `extract_summary` 取不到正文段落 | 无摘要时回退「（表格文档：约 N 行数据）」占位 |
-
-**刻意不做的**：
-- **不按长度过滤 OCR 短结果**。结果长度与「是否噪音」**无因果关系**（真噪音 `G/ooy/()` 与真标签 `VM/AI/def/Sun` 长度完全重叠），按长度丢弃会**误删真实短标签**，违反精度优先。零碎伪影保留在正文，由 stage2 结合图片上下文区分。
-- **`summary` 取到「目 录」「页眉」等样板不限修**：`summary` 是抽取式启发式，正文**完整无损**，此类语义优化交 stage2。
+**一条原则**：OCR 短结果**不按长度过滤**。长度与「是否噪音」无因果关系（真噪音与真短标签长度完全重叠），按长度丢弃会误删真实短标签，违反精度优先；零碎伪影保留在正文，交 stage2 结合图片上下文区分。
 
 ---
 
