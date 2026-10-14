@@ -450,7 +450,7 @@ rec 单独并发本已达 8.73x。
 pip install -r requirements.txt
 ```
 
-**支持平台：Linux / Windows（Python 3.9+）**。macOS 不保证可用——系统级资源限制（CPU 亲和性 / 内存硬上限）仅在 Linux（`sched_setaffinity` + `RLIMIT_AS`）和 Windows（`SetProcessAffinityMask` + Job Object）实现，macOS 无对应分支。依赖均为预编译 wheel，无需编译器：
+**支持平台：Linux / Windows（Python 3.9+）**。依赖均为预编译 wheel，无需编译器：
 
 | 库 | 用途 |
 |------|------|
@@ -460,8 +460,6 @@ pip install -r requirements.txt
 | rapidocr-onnxruntime | OCR（可选增强；不装则图片 defer） |
 
 **Windows**：命令行使用 `python`（多数 Windows 环境无 `python3` 别名）；CLI 自动重配 stdout/stderr 为 utf-8；输出统一 LF 行尾；doc-id 跨平台稳定。
-
-**macOS**：不在支持范围。可尝试运行，但**无系统级资源限制**——CPU 亲和性、内存硬上限均不生效，且代码中无 darwin 分支，行为未经验证。
 
 ---
 
