@@ -286,8 +286,10 @@ doc2md                    # 就这一行
 ```bash
 doc2md                    # 全自动
 doc2md -i mydocs          # 只指定输入
-doc2md --move -v           # 只指定选项
+doc2md -i mydocs --move -v  # 只指定选项
 ```
+
+> `--move` 会**清空输入目录**（原文件被移走），建议始终配合显式 `-i` 指定，不要依赖自动检测。
 
 ### 显式参数
 
@@ -299,7 +301,7 @@ doc2md -i <输入目录> -o <输出目录> [-c config.yaml] [--move] [-v]
 |------|------|
 | `-i / --input` | 输入目录（不指定则自动检测） |
 | `-o / --output` | 输出目录（不指定则 `./knowledge/`） |
-| `-c / --config` | 配置文件（不指定则自动查找 `config.yaml`） |
+| `-c / --config` | 配置文件（不指定则自动查找 `config.yaml`：先当前目录，再输入目录） |
 | `--move` | 移动原文件而非复制（一次性摄取，清空输入；不可增量重跑） |
 | `-v / --verbose` | 调试日志 |
 
@@ -327,8 +329,8 @@ taxonomy:                    # 类目体系（完全自定义）
 default_category: unclassified
 
 mapping:                      # 文件名 glob -> 类目（优先级最高）
-  "npu_exploit.pptx": attack-surface
-  "鸿蒙内核审计系统.docx": audit-playbook
+  "xxx.pptx": attack-surface
+  "xxx.docx": audit-playbook
 
 keywords:                     # 关键词 -> 类目（文件名+正文命中最多者胜出）
   audit-playbook: [审计, 验收, 准出]
