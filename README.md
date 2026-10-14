@@ -161,7 +161,8 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 **决策**：主路径在构造时直接传 `RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)`（rapidocr 会读该 config 写入 `sess_options`，最可靠）；另 monkey-patch `onnxruntime.InferenceSession` 兜底，防旧版 rapidocr 不支持 kwarg。默认值 1，可用环境变量 `DOC2MD_OCR_INTRA_OP` 覆盖。
 
 **理由**：不限制时，每个 ONNX 推理默认起全部核心数个线程，与 ThreadPool 相乘
-造成**线程超订**（12 线程 × 全核 16 = 192 线程抢 16 核），并行反退化为准串行。
+造成**线程超订**（12 线程 × 每会话全核 22 = 264 线程抢 22 核），并行反退化为准串行。
+同理 OpenCV 预处理算子也默认全核展开，故一并限为 1（见上表）。
 
 **关键坑**：rapidocr 的 `OrtInferSession` 总是**自己传入 `sess_options`**，因此只在
 「缺失时补默认」的 monkey-patch 会被绕过，`intra_op` 实际仍为 0（全核）。修复必须

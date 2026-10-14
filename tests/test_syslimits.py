@@ -89,7 +89,7 @@ def test_apply_system_limits_windows_cpu_rate():
     from ctypes import wintypes
 
     total = os.cpu_count() or 2
-    pipeline._apply_system_limits(max(2, int(total * 0.6)), total, 8192)
+    pipeline._apply_system_limits(max(2, int(total * 0.8)), total, 8192)
     assert_true(pipeline._job_handle is not None, "Job Object 应创建成功")
 
     class _CpuRateControl(ctypes.Structure):

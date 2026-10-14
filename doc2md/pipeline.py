@@ -9,8 +9,8 @@
     worker 数 = min(CPU预算, 图数//10), 每进程 ~400MB.
   - ThreadPool (其余): 共享单实例引擎, ONNX run() 释放 GIL 提供部分并行.
 解析用 ProcessPool 而非 ThreadPool: fitz.Page.find_tables() 在 C 层有全局状态, 线程不安全.
-系统级限制 (硬上限, 子进程继承): CPU亲和性→60%核心, Win:Job Object内存/Linux:RLIMIT_AS.
-应用级配置 (优化): 读亲和性后实际核数, 3/4 给 OCR (batch), 1/4 给 worker.
+系统级限制 (硬上限, 子进程继承): CPU亲和性→80%核心, Win:Job Object内存/Linux:RLIMIT_AS.
+应用级配置 (优化): 读亲和性后实际核数; 解析进程上限 8, OCR 线程 min(核数-1, 12).
 parser 只存图+插占位 <!-- ocr:type:dest -->, _post_ocr 替换占位为 OCR 文本或 defer 标记.
 parser 返回的 deferred (结构化 stage2 待处理项) 经 aggregate_deferred 合并后
 写入 front-matter / manifest / catalog, 供 stage2 agent 编程查询.
@@ -163,19 +163,19 @@ def _detect_resources():
     """嗅探硬件 + 设置系统级限制, 返回 (max_workers, max_ocr, cpus, avail_mb, batch_mode).
 
     两层限制 (互补, 不可省任一):
-    - 系统级 (硬上限): CPU 亲和性→60%核心, Job Object→60%内存.
+    - 系统级 (硬上限): CPU 亲和性→80%核心 (DOC2MD_CPU_PCT 可调), Job Object→60%内存.
       子进程继承, ONNX/OpenCV 内部线程也无法绕过. 这是安全网.
     - 应用级 (优化): 读亲和性限制后的实际核数, 决定 spawn 几个进程.
       避免进程数>核数导致的上下文切换. 这是吞吐优化.
 
-    batch (≥4GB): 全部解析→shutdown pool→OCR. 全部可用核给 OCR, worker 解析与
-                  OCR 不同时运行(解析早已完成并 shutdown pool).
+    batch (≥4GB): 全部解析→shutdown pool→OCR. 解析与 OCR 是先后两阶段,
+                  各自按自己的预算算 (不互相挤占).
     streaming (<4GB): 解析一个→立即 OCR+写出+gc. OCR 拿满, worker=1.
 
     CPU 上限可调 (环境变量):
       DOC2MD_CPU_PCT  整机占用上限百分比 (默认 80). 同时决定亲和性核数与
                       Job Object CPU rate.
-      DOC2MD_OCR_THREADS  OCR 线程数 (默认 = 亲和性后核数, 即占满所限核数).
+      DOC2MD_OCR_THREADS  OCR 线程数 (默认 min(核数-1, 12), 实测 12 最优).
     """
     raw_cpus = os.cpu_count() or 2
 
@@ -190,7 +190,7 @@ def _detect_resources():
         cpu_pct = 80.0
     cpu_pct = min(100.0, max(1.0, cpu_pct))
     cpu_budget = max(1, int(raw_cpus * cpu_pct / 100))
-    _apply_system_limits(cpu_budget, raw_cpus, avail_mb, cpu_pct)
+    _apply_system_limits(cpu_budget, raw_cpus, avail_mb)
 
     # 应用级: 读亲和性限制后的实际核数 (不再自己打折, 亲和性已限制)
     cpus = _get_affinity_count() or cpu_budget
@@ -230,7 +230,7 @@ def _detect_resources():
     return max_workers, max_ocr, cpus, avail_mb, batch_mode
 
 
-def _apply_system_limits(cpu_budget, cpus, avail_mb, cpu_pct=None):
+def _apply_system_limits(cpu_budget, cpus, avail_mb):
     """从系统层面限制 CPU 和内存 (子进程自动继承).
 
     Windows:
@@ -352,6 +352,9 @@ def _apply_system_limits(cpu_budget, cpus, avail_mb, cpu_pct=None):
 
                         JOB_OBJECT_CPU_RATE_CONTROL_ENABLE = 0x1
                         JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP = 0x4
+                        # rate 与亲和性同口径 (均基于取整后的 cpu_budget), 避免两者
+                        # 不一致而互相打架. 故实设比例略低于 DOC2MD_CPU_PCT 标称值
+                        # (如 80% -> 22/28 = 78.6%), 取决于核数取整.
                         rate = max(1, min(10000, int(10000 * cpu_budget / max(1, cpus))))
                         crc = _CpuRateControl()
                         crc.ControlFlags = (JOB_OBJECT_CPU_RATE_CONTROL_ENABLE

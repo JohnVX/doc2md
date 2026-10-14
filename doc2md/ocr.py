@@ -6,8 +6,8 @@
 DOC2MD_OCR_INTRA_OP 可调), 并 monkey-patch InferenceSession 兜底; 同时
 用 cv2.setNumThreads(1) 限制 OpenCV 预处理线程 (intra_op 管不到).
 不限制时 ORT 默认用全部核心, OpenCV 每个并行算子也开全核, 与 pipeline 的
-ThreadPool 相乘会严重超订 (12 线程 x 全核), 并行退化为串行且进程 CPU 占用
-突破系统上限. OMP_NUM_THREADS=1 在 Windows 无效, 必须改 session 选项 /
+ThreadPool 相乘会严重超订 (12 线程 x 全核), 并行退化为准串行.
+OMP_NUM_THREADS=1 在 Windows 无效, 必须改 session 选项 /
 cv2.setNumThreads. 详见 _intra_op_value / _new_engine / _limit_cv_threads.
 
 并行由 pipeline 的 ThreadPool 提供 (ONNX run() 线程安全, 共享单实例引擎).
@@ -81,7 +81,7 @@ def _limit_cv_threads():
     utils/process_img.py, load_image.py) 由 OpenCV 执行; OpenCV 默认为每个
     并行算子开 CPU 核数 个内部线程. intra_op_num_threads 只管 ONNX 推理,
     **不覆盖**这些预处理算子. 于是 N 个 OCR 线程 x 每算子全核 = 严重超订,
-    实测 (Windows 28核) 进程占用冲到 85% (~24核), 突破 Job Object 57% 硬上限.
+    线程争抢导致并行退化为准串行 (与 ONNX 侧同一道理).
 
     与 ONNX 侧同理: 并行度应由 pipeline 的 ThreadPool 统一提供, OpenCV
     内部不再各自展开. Windows 上 OMP_NUM_THREADS 对 OpenCV 无效, 必须调
