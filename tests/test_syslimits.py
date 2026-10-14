@@ -93,10 +93,8 @@ def test_apply_system_limits_windows_cpu_rate():
     assert_true(pipeline._job_handle is not None, "Job Object 应创建成功")
 
     class _CpuRateControl(ctypes.Structure):
-        _fields_ = [("ControlFlags", wintypes.DWORD),
-                    ("CpuRate", wintypes.DWORD),
-                    ("Weight", wintypes.WORD),
-                    ("Reserved", wintypes.WORD)]
+        _fields_ = [("ControlFlags", ctypes.c_uint32),
+                    ("CpuRate", ctypes.c_uint32)]
 
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     k32.QueryInformationJobObject.argtypes = [

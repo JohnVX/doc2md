@@ -306,11 +306,15 @@ def _apply_system_limits(cpu_budget, cpus, avail_mb):
                 # ControlFlags = ENABLE(0x1) | HARD_CAP(0x4); CpuRate 单位为 1/100 百分比.
                 if ok1 and ok2:
                     try:
+                        # JOBOBJECT_CPU_RATE_CONTROL_INFORMATION:
+                        #   DWORD ControlFlags; union { DWORD CpuRate; DWORD Weight; };
+                        # 长度必须精确为 8 字节, 否则 SetInformationJobObject
+                        # 报 ERROR_BAD_LENGTH(24) 而失败.
+                        # 用 c_uint32 而非 wintypes.DWORD: 后者在非 Windows 平台
+                        # 退化为 8 字节, 显式指定 4 字节才能保证结构布局与 C 一致.
                         class _CpuRateControl(ctypes.Structure):
-                            _fields_ = [("ControlFlags", wintypes.DWORD),
-                                        ("CpuRate", wintypes.DWORD),
-                                        ("Weight", wintypes.WORD),
-                                        ("Reserved", wintypes.WORD)]
+                            _fields_ = [("ControlFlags", ctypes.c_uint32),
+                                        ("CpuRate", ctypes.c_uint32)]
 
                         JOB_OBJECT_CPU_RATE_CONTROL_ENABLE = 0x1
                         JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP = 0x4
