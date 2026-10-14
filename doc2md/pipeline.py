@@ -168,8 +168,14 @@ def _detect_resources():
     - 应用级 (优化): 读亲和性限制后的实际核数, 决定 spawn 几个进程.
       避免进程数>核数导致的上下文切换. 这是吞吐优化.
 
-    batch (≥4GB): 全部解析→shutdown pool→OCR. 3/4 核给 OCR, 1/4 给 worker.
+    batch (≥4GB): 全部解析→shutdown pool→OCR. 全部可用核给 OCR, worker 解析与
+                  OCR 不同时运行(解析早已完成并 shutdown pool).
     streaming (<4GB): 解析一个→立即 OCR+写出+gc. OCR 拿满, worker=1.
+
+    CPU 上限可调 (环境变量):
+      DOC2MD_CPU_PCT  整机占用上限百分比 (默认 80). 同时决定亲和性核数与
+                      Job Object CPU rate.
+      DOC2MD_OCR_THREADS  OCR 线程数 (默认 = 亲和性后核数, 即占满所限核数).
     """
     raw_cpus = os.cpu_count() or 2
 
@@ -177,34 +183,54 @@ def _detect_resources():
 
     log.info("硬件: %d 核 / %.1fGB 可用", raw_cpus, avail_mb / 1024)
 
-    # 系统级限制: 60% 核 + 60% 内存 (硬上限, 子进程继承)
-    cpu_budget = max(2, int(raw_cpus * 0.6))
-    _apply_system_limits(cpu_budget, raw_cpus, avail_mb)
+    # 系统级限制: CPU 上限 DOC2MD_CPU_PCT% (默认 80) + 60% 内存 (硬上限, 子进程继承)
+    try:
+        cpu_pct = float(os.environ.get("DOC2MD_CPU_PCT", "80"))
+    except ValueError:
+        cpu_pct = 80.0
+    cpu_pct = min(100.0, max(1.0, cpu_pct))
+    cpu_budget = max(1, int(raw_cpus * cpu_pct / 100))
+    _apply_system_limits(cpu_budget, raw_cpus, avail_mb, cpu_pct)
 
-    # 应用级: 读亲和性限制后的实际核数 (不再自己乘 0.6, 亲和性已限制)
+    # 应用级: 读亲和性限制后的实际核数 (不再自己打折, 亲和性已限制)
     cpus = _get_affinity_count() or cpu_budget
     ocr_budget_mb = max(0, int(avail_mb * 0.6) - 1024)
     batch_mode = avail_mb >= 4096
+    forced_ocr = os.environ.get("DOC2MD_OCR_THREADS")
     if batch_mode:
-        max_ocr = min(max(1, cpus * 3 // 4), max(1, ocr_budget_mb // 200))
+        # 解析阶段与 OCR 阶段不同时 (解析早已完成并 shutdown pool), 故 OCR 可
+        # 拿满所限核数; 不再打 3/4 折扣 (旧值浪费了 1/4 算力, 实测 12 线程
+        # 只能跑出 9.3 核). 留 1 核给主线程收尾/IO.
+        max_ocr = max(1, cpus - 1)
+        if forced_ocr:
+            try:
+                max_ocr = max(1, int(forced_ocr))
+            except ValueError:
+                pass
+        max_ocr = min(max_ocr, max(1, ocr_budget_mb // 200))
         max_workers = min(cpus * 2, max(1, avail_mb // 500), 8, max(1, cpus - max_ocr))
     else:
         max_ocr = min(max(1, cpus), max(1, ocr_budget_mb // 200))
+        if forced_ocr:
+            try:
+                max_ocr = max(1, int(forced_ocr))
+            except ValueError:
+                pass
         max_workers = 1
     log.info("配置: 解析 %d 进程, OCR %d 线程 (%s)",
              max_workers, max_ocr, "批量" if batch_mode else "流式")
     return max_workers, max_ocr, cpus, avail_mb, batch_mode
 
 
-def _apply_system_limits(cpu_budget, cpus, avail_mb):
+def _apply_system_limits(cpu_budget, cpus, avail_mb, cpu_pct=None):
     """从系统层面限制 CPU 和内存 (子进程自动继承).
 
     Windows:
       1. CPU 亲和性: SetProcessAffinityMask → 只用 cpu_budget 个核心.
          子进程继承掩码, ONNX/OpenCV 内部线程也无法绕过.
       2. Job Object: 内存硬上限 (整个进程树 commit 总量, 超限则分配失败).
-      3. Job Object CPU 占用率硬上限 (Win8+): cpu_budget/cpus 比例, 子进程继承.
-         亲和性只限核数(限住的核仍会跑满), 本项才限真正的 CPU 占用率.
+      3. Job Object CPU 占用率硬上限 (Win8+): 按整机百分比 cpu_pct 计, 子进程继承.
+         亲和性只限核数(限住的核仍可被跑满), 本项才限真正的 CPU 占用率.
     Linux:
       1. CPU 亲和性: sched_setaffinity.
       2. RLIMIT_AS: 单进程虚拟地址空间上限 (防泄漏, 非 tree-wide; tree-wide 需 cgroups/root).
