@@ -165,7 +165,8 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 同理 OpenCV 预处理算子也默认全核展开，故一并限为 1（见上表）。
 
 **关键坑**：rapidocr 的 `OrtInferSession` 总是**自己传入 `sess_options`**，因此只在
-「缺失时补默认」的 monkey-patch 会被绕过，`intra_op` 实际仍为 0（全核）。修复必须
+「缺失时补默认」的 monkey-patch 会被绕过，`intra_op` 实际未设置（rapidocr 的
+config 默认 `-1` = 不写该项 → ORT 用全部核心）。修复必须
 **原地覆盖**调用方传入的 `sess_options`，或在构造 `RapidOCR` 时直接传
 `intra_op_num_threads`（推荐）。`OMP_NUM_THREADS=1` 在 Windows 上无效，必须改 session 选项。
 
