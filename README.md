@@ -456,10 +456,10 @@ pip install -r requirements.txt
 |------|------|
 | python-docx / python-pptx / openpyxl | Office 解析 |
 | PyMuPDF (fitz) | PDF 文字层/大纲/渲染/表格抽取 |
-| Pillow | 图像 |
 | PyYAML | config/manifest/catalog/front-matter |
-| psutil | 资源嗅探（可选；不装时 Windows 用 ctypes 兜底，Linux 用 `/proc/meminfo`） |
 | rapidocr-onnxruntime | OCR（可选增强；不装则图片 defer） |
+
+库内不直接使用 Pillow / psutil：Pillow 为 python-pptx 的传递依赖；内存嗅探优先 psutil、缺失时自动回退平台 API（Windows ctypes / Linux `/proc/meminfo`）。
 
 无 tesseract / pandoc / libreoffice / torch / paddle——都不需要。
 
