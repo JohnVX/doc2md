@@ -16,17 +16,23 @@ DEFER_TYPES = frozenset({
 })
 
 
-def defer(deferred, type, count=1, note=""):
+def defer(deferred, type, count=1, note="", loc=""):
     """记录结构化 deferred 项并返回标准化 stage2 标记串.
 
     标记格式: <!-- stage2:{type}={count} {note} -->
     可用正则统一提取: re.findall(r'<!-- stage2:([\\w-]+)=(\\d+)(?:\\s+(.*?))? -->', body)
 
-    deferred: list, 调用方传入, 本函数 append 一项 {type, count, note}.
+    deferred: list, 调用方传入, 本函数 append 一项 {type, count, note, loc}.
+    loc: 可选定位线索 (如 PDF 页号 'p3' / xlsx 'sheet:销售' / docx 段落序),
+         供 stage2 在文件中定位该项; 不体现在正文标记里 (标记只留 note),
+         仅用于 front-matter/catalog/handoff 的结构化定位.
     返回: 标准化标记字符串, 拼入 body 即可.
     """
     note = (note or "").replace("-->", "").replace("\n", " ").strip()
-    deferred.append({"type": type, "count": count, "note": note})
+    item = {"type": type, "count": count, "note": note}
+    if loc:
+        item["loc"] = loc
+    deferred.append(item)
     tag = f"<!-- stage2:{type}={count}"
     if note:
         tag += f" {note}"
@@ -34,15 +40,34 @@ def defer(deferred, type, count=1, note=""):
 
 
 def aggregate_deferred(items):
-    """合并同 type 的 deferred 项: count 求和, note 取首个非空."""
+    """合并同 type 的 deferred 项: count 求和, note 取首个非空, loc 汇总为列表.
+
+    locs 保留全部定位线索 (去重, 按出现序) —— 同类型多项分布在不同位置时不丢位置.
+    仅当某项有 loc 时输出 locs 字段, 不产生空字段噪声.
+    """
     by_type = {}
     for it in items:
         t = it["type"]
         if t in by_type:
             by_type[t]["count"] += it["count"]
+            if not by_type[t]["note"] and it.get("note"):
+                by_type[t]["note"] = it["note"]
         else:
             by_type[t] = {"type": t, "count": it["count"], "note": it.get("note", "")}
-    return list(by_type.values())
+            if it.get("loc"):
+                by_type[t]["_locs"] = []
+        loc = it.get("loc")
+        if loc:
+            by_type[t].setdefault("_locs", [])
+            if loc not in by_type[t]["_locs"]:
+                by_type[t]["_locs"].append(loc)
+    out = []
+    for t, d in by_type.items():
+        locs = d.pop("_locs", None)
+        if locs:
+            d["locs"] = locs
+        out.append(d)
+    return out
 
 # 母版/占位符样板文本 (中英). 用"整串匹配"而非全文子串:
 # 占位符是 Powerpoint 母版里的**固定短样板句**(如 "Click to add title"),

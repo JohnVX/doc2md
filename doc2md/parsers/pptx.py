@@ -135,7 +135,9 @@ def _render_slide(idx, slide, ctx, deferred):
             if st not in (MSO_SHAPE_TYPE.LINE, MSO_SHAPE_TYPE.FREEFORM):
                 unhandled += 1
     if unhandled:
-        items.append(defer(deferred, "chart", unhandled, "图表/SmartArt等未提取"))
+        # loc 记录 slide 号: stage2 据此定位到具体幻灯片 (标记已在 slide 内, 位置准确)
+        items.append(defer(deferred, "chart", unhandled, "图表/SmartArt等未提取",
+                           loc=f"slide:{idx}"))
 
     # 备注
     try:

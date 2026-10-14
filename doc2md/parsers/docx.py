@@ -6,7 +6,7 @@
   - 段落内嵌图(含纯图段落) -> 提取 blob -> 存 assets -> OCR 占位(收尾执行)
   - 浮动文本框 (w:txbxContent) -> 扫描 XML 提取文字附在末尾
   - 脚注/尾注/批注 -> 读 zip 内独立 part (word/footnotes|endnotes|comments.xml) 提取
-  - 公式(OMML)/图表/SmartArt -> 检测到即标记 stage2(文本框不计, 其文字已提取)
+  - 公式(OMML)/图表/SmartArt -> 在所在段落处原位标记 stage2(文本框不计, 其文字已提取)
 
 有意不提取 (无实质内容/语义无关, 不标记也不交 stage2):
   - 页眉/页脚: 多为页码/公司名/文档名样板, 提取与去噪目标矛盾
@@ -46,6 +46,9 @@ def parse(path, ctx=None):
             line = _render_paragraph(para_map[child], d, ctx, deferred)
             if line is not None:
                 out.append(line)
+            # 原位标记: 该段含未提取内容(公式/图表)时, 紧跟其后插标记,
+            # 以便 stage2 定位到正文具体位置(而非文档末尾汇总)
+            _mark_unextracted(child, deferred, out)
         elif child in tbl_map:
             out.append(render_table(tbl_map[child]))
             # 表格单元格内的图片(表格 md 放不下图, 单独附后提取+OCR, 不静默丢失)
@@ -55,6 +58,7 @@ def parse(path, ctx=None):
                     out.append(f"![表格图{i}]({ref})\n\n<!-- ocr:img:{dest} -->")
                 else:
                     out.append(defer(deferred, "image-ocr", 1, "表格内嵌图未存盘"))
+            _mark_unextracted(child, deferred, out)
 
     # 浮动文本框防御 (body 之外的 drawing 里的文本)
     txbx = _extract_textboxes(d)
@@ -75,8 +79,6 @@ def parse(path, ctx=None):
     if cm:
         out.append("### 批注")
         out.extend(cm)
-    # 诚实标记: 检测到但未提取的内容(公式/图表/SmartArt), 留给 stage2
-    _detect_unextracted(d, deferred, out)
 
     body = "\n\n".join(x for x in out if x) or f"<!-- 空文档: {Path(path).name} -->"
     return {"title": title, "body": body, "tags": [], "meta": {}, "deferred": deferred}
@@ -235,23 +237,29 @@ def _extract_textboxes(d):
     return out
 
 
-def _detect_unextracted(d, deferred, out):
-    """检测到但 stage1 未提取的内容(公式/图表/SmartArt), 追加 defer 标记到 out."""
+def _mark_unextracted(element, deferred, out):
+    """检测该 body 子元素内未提取内容(公式/图表/SmartArt), 原位追加 stage2 标记.
+
+    逐段检测并跟随段落输出, 使标记定位于正文中实际位置;
+    同段多公式合并为一条 (count=N), loc 记录段内序号供 stage2 定位.
+    """
     from docx.oxml.ns import qn
     # 数学公式 (OMML)
+    n_eq = 0
     try:
-        n_eq = len(d.element.findall(".//" + qn("m:oMath")))
+        n_eq = len(element.findall(".//" + qn("m:oMath")))
     except Exception:
         n_eq = 0
     if n_eq:
         out.append(defer(deferred, "formula", n_eq, "含数学公式(OMML)未提取"))
     # 非位图 drawing (图表/SmartArt 等): drawing 内无 a:blip 即非图片.
     # 排除文本框(含 w:txbxContent)——其文字已由 _extract_textboxes 提取, 不算未提取图形.
+    n_graphic = 0
     try:
         txbx_qn = qn("w:txbxContent")
         blip_qn = qn("a:blip")
         n_graphic = sum(
-            1 for dr in d.element.iter(qn("w:drawing"))
+            1 for dr in element.iter(qn("w:drawing"))
             if not dr.findall(".//" + blip_qn)
             and not dr.findall(".//" + txbx_qn)
         )

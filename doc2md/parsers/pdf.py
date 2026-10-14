@@ -81,7 +81,8 @@ def parse(path, ctx=None):
                 n_imgs = 0
             if n_imgs and page_md.strip():
                 page_md += "\n\n" + defer(deferred, "inline-image", n_imgs,
-                                          "图内文字未提取, 见原文件")
+                                          "图内文字未提取, 见原文件",
+                                          loc=f"p{i + 1}")
             out.append(page_md)
         body = "\n\n".join(x for x in out if x)
     finally:

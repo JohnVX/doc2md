@@ -246,7 +246,9 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 
 正文标记可用正则统一提取：`<!-- stage2:([\w-]+)=(\d+)(?:\s+(.*?))? -->`
 
-同一文档内多个同类型项经 `aggregate_deferred` 合并（count 求和）。无待处理项的文档不输出 `deferred` 字段，不产生噪声。
+同一文档内多个同类型项经 `aggregate_deferred` 合并（count 求和）；若各项带 `loc` 定位线索（PDF 页号 / xlsx sheet 名），合并为 `locs` 列表，**位置不丢**。无待处理项的文档不输出 `deferred` 字段，不产生噪声。
+
+**stage2 的完整契约在 `handoff.yaml`**：`deferred_contract`（10 种类型的 where/source/action）、`procedure`（6 步流程）、`termination`（完成/`blocked`/幂等三种终止条件）、`loc_field`、`output_guide`、`layout`、`stage2_pending`。契约与代码内的 `DEFER_TYPES` 由启动时一致性校验 + 回归测试守护，不会出现“代码有类型、契约无说明”。
 
 ---
 

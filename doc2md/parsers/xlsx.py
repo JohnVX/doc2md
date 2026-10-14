@@ -175,16 +175,20 @@ def parse(path, ctx=None):
         # 否则 stage2 从交接单看不到该 sheet 被截, 会漏处理大表.
         if truncated and col_trunc:
             out.append(defer(deferred, "truncated", 1,
-                             f"sheet '{ws.title}' 行数超 {MAX_ROWS} 且列数超 {MAX_COLS}, 已截断"))
+                             f"sheet '{ws.title}' 行数超 {MAX_ROWS} 且列数超 {MAX_COLS}, 已截断",
+                             loc=f"sheet:{ws.title}"))
         elif truncated:
             out.append(defer(deferred, "truncated", 1,
-                             f"sheet '{ws.title}' 行数超 {MAX_ROWS}, 已截断"))
+                             f"sheet '{ws.title}' 行数超 {MAX_ROWS}, 已截断",
+                             loc=f"sheet:{ws.title}"))
         elif col_trunc:
             out.append(defer(deferred, "truncated", 1,
-                             f"sheet '{ws.title}' 列数超 {MAX_COLS}, 已截断"))
+                             f"sheet '{ws.title}' 列数超 {MAX_COLS}, 已截断",
+                             loc=f"sheet:{ws.title}"))
         if formula_count:
             out.append(defer(deferred, "formula-cell", formula_count,
-                             "无缓存值, 已回退显示公式文本, 见原文件复核"))
+                             "无缓存值, 已回退显示公式文本, 见原文件复核",
+                             loc=f"sheet:{ws.title}"))
     wb.close()
 
     body = "\n\n".join(x for x in out if x) or "<!-- 空工作簿 -->"

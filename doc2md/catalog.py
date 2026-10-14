@@ -56,7 +56,7 @@ _HANDOFF_STATIC = {
             "action": "多模态理解图片, 提取语义描述或文字",
         },
         "inline-image": {
-            "where": "md body 中 <!-- stage2:inline-image=N --> 标记, 位于该页文字内容之后; 据此推断 PDF 页号",
+            "where": "md body 中 <!-- stage2:inline-image=N --> 标记, 紧随该页文字内容; 具体页码见该项 locs (如 p3)",
             "source": "original-doc/<relpath> (PDF 原件, 按推断的页号定位图片)",
             "action": "提取图内文字或描述图内容",
         },
@@ -66,22 +66,22 @@ _HANDOFF_STATIC = {
             "action": "OCR 或多模态理解扫描页内容",
         },
         "formula": {
-            "where": "md body 中 <!-- stage2:formula=N --> 标记 (文档末尾汇总)",
+            "where": "md body 中 <!-- stage2:formula=N --> 标记, 紧跟含公式的段落之后 (原位标记, 位置精准)",
             "source": "original-doc/<relpath> (原件, 含 OMML 公式)",
             "action": "渲染或描述公式",
         },
         "chart": {
-            "where": "md body 中 <!-- stage2:chart=N --> 标记 (文档末尾汇总)",
+            "where": "md body 中 <!-- stage2:chart=N --> 标记, 位于该图/图形所在段落之后 (原位标记)",
             "source": "original-doc/<relpath> (原件, 含图表/SmartArt)",
             "action": "多模态理解图表内容",
         },
         "formula-cell": {
-            "where": "md body 中 <!-- stage2:formula-cell=N --> 标记, 位于 sheet 表格之后",
+            "where": "md body 中 <!-- stage2:formula-cell=N --> 标记, 位于 sheet 表格之后; 具体 sheet 见该项 locs (如 sheet:销售)",
             "source": "original-doc/<relpath> (xlsx 原件)",
             "action": "复核公式计算结果, 更新已回退显示的公式文本",
         },
         "truncated": {
-            "where": "md body 中 <!-- stage2:truncated=N --> 标记 (位于被截断的 sheet 表格之后)",
+            "where": "md body 中 <!-- stage2:truncated=N --> 标记, 位于被截断的 sheet 表格之后; 具体 sheet 见该项 locs",
             "source": "original-doc/<relpath> (xlsx 原件)",
             "action": "该 sheet 行列超过上限(行2000/列100)已截断, 需读原件补全或改用结构化提取",
         },
@@ -107,8 +107,15 @@ _HANDOFF_STATIC = {
         "打开工作项 doc 路径的 md 文件, 用正则 <!-- stage2:type=N --> 找到该 type 的所有标记 (可能多个, 逐个处理)",
         "对每个标记: 按 where 定位原件 (图片类跟随紧邻上方的 ![](path) 引用; PDF/xlsx 等读 source 原件), 执行 action, 将结果替换该标记",
         "该 type 全部标记替换后, 四处同步更新: md body(已替换) + front-matter deferred(移除该项) + catalog.yaml 该文档 deferred(移除该项) + handoff.yaml stage2_pending(移除该工作项)",
-        "重复步骤 1-5 直到 stage2_pending 为空",
+        "若某项确实无法处理(如无解密能力/无对应解析器): 不要假装完成。在该工作项下加 blocked: <原因> 并保留标记与 deferred 字段, 继续处理其他项",
+        "重复步骤 1-5 直到 stage2_pending 为空 (或只剩 blocked 项)",
     ],
+    "termination": {
+        "done": "stage2_pending 为空 (全部处理完毕)",
+        "blocked": "存在无法处理的项时停下并上报, 不静默丢弃、不假装完成; blocked 项保留在 stage2_pending 供人工介入",
+        "idempotent": "重复运行安全: 已替换的标记不再匹配正则, 不会重复处理",
+    },
+    "loc_field": "deferred 项可含 locs (定位线索列表, 如 ['p3','sheet:销售']). 标记已在正文原位置时(如 docx 公式紧跟所在段落), 无需 locs; 汇总型标记(PDF 内嵌图/pptx 图表/xlsx 截断)带 locs 指明页号或 sheet 名",
     "output_guide": {
         "md_body": "替换 docs/<category>/<doc-id>.md 中的 <!-- stage2: --> 标记为实际内容",
         "front_matter": "同步更新该 md 的 front-matter deferred 字段 (移除已处理项)",
@@ -142,6 +149,23 @@ def _collect_stage2_pending(entries):
                 "deferred": [dict(d) for d in deferred],
             })
     return pending
+
+
+def _check_contract_consistency():
+    """断言 DEFER_TYPES 与 deferred_contract 完全一致.
+
+    两处是权威列表 (代码枚举 / 交接契约), 新增类型时若只改一处会导致
+    stage2 收到未知 type. 此处启动时校验并告警, 不中断运行.
+    """
+    from .parsers._common import DEFER_TYPES
+    contract = set(_HANDOFF_STATIC["deferred_contract"])
+    missing = DEFER_TYPES - contract
+    extra = contract - DEFER_TYPES
+    if missing:
+        log.warning("defer 类型 %s 未在 handoff 契约中声明 (stage2 将无法处理)",
+                    sorted(missing))
+    if extra:
+        log.warning("handoff 契约含未使用的 defer 类型: %s", sorted(extra))
 
 
 def build_catalog(entries, output_root):
@@ -180,6 +204,7 @@ def build_catalog(entries, output_root):
 
 def build_handoff(entries, output_root):
     """写 index/handoff.yaml — stage1→stage2 交接说明 + stage2_pending 工作项."""
+    _check_contract_consistency()
     pending = _collect_stage2_pending(entries)
     data = copy.deepcopy(_HANDOFF_STATIC)
     data["stage2_pending"] = pending
