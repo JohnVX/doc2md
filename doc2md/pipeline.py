@@ -203,11 +203,10 @@ def _detect_resources():
         # 1 进程 (实测解析 6.0s -> 11.8s), 无谓拖慢.
         # 解析: 进程数受核数/内存/文件数限, 上限 8 (防 spawn 开销与内存暴涨).
         max_workers = min(cpus, max(1, avail_mb // 500), 8)
-        # OCR: 默认不超过 12 线程. 实测 (28核, 156 图) 对比:
-        #   12 线程 = 9.3 核 / 90.9s
-        #   21 线程 = 19.3 核 / 101.1s (更慢)
-        # 说明有效并行在 ~10 核附近饱和 (ONNX session 锁 / 内存带宽),
-        # 盲目加线程只会超订. 保留 DOC2MD_OCR_THREADS 可现场覆盖调优.
+        # OCR: 默认不超过 12 线程. 实测 (Windows 28核, 156 图) 扫描:
+        #    4线程=166.2s | 8=107.5s | 12=91.8s | 16=97.7s | 21=101.1s
+        # 12 为最优: 更少核数不足, 更多超订 (上下文切换 / ONNX session 锁 /
+        # 内存带宽饱和). 保留 DOC2MD_OCR_THREADS 可现场覆盖调优.
         max_ocr = min(max(1, cpus - 1), 12)
         if forced_ocr:
             try:
