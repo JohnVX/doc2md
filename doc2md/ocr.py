@@ -3,10 +3,12 @@
 通用, 不针对任何具体图片内容. img 可为路径或 bytes.
 
 防超订: 构造 RapidOCR 时传 intra_op_num_threads=N (默认 1, 环境变量
-DOC2MD_OCR_INTRA_OP 可调), 并 monkey-patch InferenceSession 兜底.
-不限制时 ORT 默认用全部核心, 与 pipeline 的 ThreadPool 相乘会严重超订
-(12 线程 x 全核), 并行退化为串行. OMP_NUM_THREADS=1 在 Windows 无效,
-必须改 session 选项. 详见 _intra_op_value / _new_engine.
+DOC2MD_OCR_INTRA_OP 可调), 并 monkey-patch InferenceSession 兜底; 同时
+用 cv2.setNumThreads(1) 限制 OpenCV 预处理线程 (intra_op 管不到).
+不限制时 ORT 默认用全部核心, OpenCV 每个并行算子也开全核, 与 pipeline 的
+ThreadPool 相乘会严重超订 (12 线程 x 全核), 并行退化为串行且进程 CPU 占用
+突破系统上限. OMP_NUM_THREADS=1 在 Windows 无效, 必须改 session 选项 /
+cv2.setNumThreads. 详见 _intra_op_value / _new_engine / _limit_cv_threads.
 
 并行由 pipeline 的 ThreadPool 提供 (ONNX run() 线程安全, 共享单实例引擎).
 
@@ -70,6 +72,26 @@ def available():
             log.warning("rapidocr 不可用, 图片将 defer 到 stage2: %s", e)
             _probed = False
     return _probed and not _broken
+
+
+def _limit_cv_threads():
+    """限制 OpenCV 内部线程池为 1 (防与 pipeline 的 OCR ThreadPool 相乘超订).
+
+    RapidOCR 的预处理 (cv2.resize/cvtColor/warpAffine 等, 见 rapidocr
+    utils/process_img.py, load_image.py) 由 OpenCV 执行; OpenCV 默认为每个
+    并行算子开 CPU 核数 个内部线程. intra_op_num_threads 只管 ONNX 推理,
+    **不覆盖**这些预处理算子. 于是 N 个 OCR 线程 x 每算子全核 = 严重超订,
+    实测 (Windows 28核) 进程占用冲到 85% (~24核), 突破 Job Object 57% 硬上限.
+
+    与 ONNX 侧同理: 并行度应由 pipeline 的 ThreadPool 统一提供, OpenCV
+    内部不再各自展开. Windows 上 OMP_NUM_THREADS 对 OpenCV 无效, 必须调
+    cv2.setNumThreads. 失败静默 (纯性能优化, 不影响正确性).
+    """
+    try:
+        import cv2
+        cv2.setNumThreads(1)
+    except Exception:
+        pass
 
 
 def _intra_op_single():
@@ -146,6 +168,7 @@ def _engine_obj():
         with _lock:
             if _engine is None:
                 _intra_op_single()
+                _limit_cv_threads()
                 try:
                     _engine = _new_engine()
                     log.info("rapidocr 引擎已就绪")

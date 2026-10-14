@@ -214,3 +214,28 @@ def test_intra_op_value_default_and_override():
 
 CASES.append(("new_engine_forces_single_thread", test_new_engine_forces_single_thread))
 CASES.append(("intra_op_value_default_and_override", test_intra_op_value_default_and_override))
+
+
+def test_limit_cv_threads_sets_one():
+    """回归: _limit_cv_threads 应把 OpenCV 内部线程数设为 1.
+
+    真实 bug: intra_op_num_threads 只限 ONNX 推理, RapidOCR 的预处理
+    (cv2.resize/cvtColor 等) 由 OpenCV 执行且默认为每个算子开全核. N 个
+    OCR 线程 x 全核 = 严重超订, Windows 28核 实测进程占用冲到 85% (~24核),
+    突破 Job Object 57% 硬上限. 修复: cv2.setNumThreads(1), 并行度统一由
+    pipeline 的 ThreadPool 提供.
+    """
+    try:
+        import cv2
+    except ImportError:
+        skip("cv2 未安装")
+    saved = cv2.getNumThreads()
+    try:
+        cv2.setNumThreads(0)  # 先置为非 1, 确保断言不被旧值掩盖
+        ocr._limit_cv_threads()
+        assert_eq(1, cv2.getNumThreads(), "OpenCV 线程数应被限制为 1")
+    finally:
+        cv2.setNumThreads(saved)
+
+
+CASES.append(("limit_cv_threads_sets_one", test_limit_cv_threads_sets_one))
