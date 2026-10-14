@@ -77,6 +77,7 @@ def _ocr_mode_decision(batch_mode, max_ocr, avail_mb, total_images):
 def _ocr_proc_init():
     """ProcessPool worker 初始化: 加载 ONNX 引擎, 计时."""
     import time
+    _child_logging_setup()
     t0 = time.time()
     eng = ocr._engine_obj()
     elapsed = time.time() - t0
@@ -550,8 +551,28 @@ def _parse_failure(p, rel, ex):
     }
 
 
+def _child_logging_setup():
+    """子进程 logging 配置 (spawn 平台必需).
+
+    Windows 用 spawn 启动子进程: 全新解释器重新 import 模块, 父进程在
+    run() 执行的 logging.basicConfig 不会重放, 子进程 root logger 无 handler,
+    于是子进程里 parser 的 log.info/warning 被静默丢弃 (Linux fork 继承父进程
+    handler, 无此问题). 表现为同一命令 Windows 看不到如 "PDF 检出 N 个跨页样板"
+    / "PDF 加密且需口令" 等解析期日志.
+
+    用 if not handlers 守卫: fork 下已继承 handler, 不重复配置 (否则会出现
+    重复行). 级别从环境变量读 (父进程按 verbose 写入).
+    """
+    if logging.getLogger().handlers:
+        return
+    lvl_name = os.environ.get("DOC2MD_LOG_LEVEL", "INFO")
+    level = getattr(logging, lvl_name.upper(), logging.INFO)
+    logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+
+
 def _parse_worker(handler, path_str, ctx_dict):
     """子进程解析入口: 返回 (parsed, elapsed_seconds). 异常不捕获, 由调用方处理."""
+    _child_logging_setup()
     from doc2md import parsers
     t0 = time.time()
     result = parsers.get(handler)(path_str, ctx_dict)
@@ -787,6 +808,8 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
     """
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+    # 传给 spawn 子进程 (子进程重配 logging 时读; fork 下无害)
+    os.environ["DOC2MD_LOG_LEVEL"] = logging.getLevelName(level)
     _t_start = time.time()
     # 压掉 pdfminer/PIL 的内部噪声 (FontBBox 等), 只留 ERROR
     for noisy in ("pdfminer", "pdfminer.six", "PIL"):

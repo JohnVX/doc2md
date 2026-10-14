@@ -113,10 +113,49 @@ def test_apply_system_limits_windows_cpu_rate():
     assert_true(0 < crc.CpuRate <= 10000, f"CpuRate 应合理: {crc.CpuRate}")
 
 
+def test_child_logging_setup():
+    """回归: 子进程未配 logging 时应自配 handler (Windows spawn 必需).
+
+    真实缺陷: Windows 用 spawn 启动 ProcessPool 子进程, 全新解释器不会重放父
+    进程的 logging.basicConfig, 子进程 root logger 无 handler, 解析期日志
+    (如 pdf 的 "PDF 检出 N 个跨页样板"/"PDF 加密且需口令") 被静默丢弃.
+    Linux fork 继承 handler 故无此问题——同一命令两个平台日志不一致.
+    """
+    import logging
+    root = logging.getLogger()
+    saved = list(root.handlers)
+    saved_lvl = root.level
+    saved_env = os.environ.get("DOC2MD_LOG_LEVEL")
+    try:
+        # 清空 handler, 模拟 spawn 子进程的初始状态
+        for h in list(root.handlers):
+            root.removeHandler(h)
+        os.environ["DOC2MD_LOG_LEVEL"] = "DEBUG"
+        pipeline._child_logging_setup()
+        assert_true(len(root.handlers) > 0, "无 handler 时应自配 handler")
+        assert_eq(logging.DEBUG, root.level, "级别应取自 DOC2MD_LOG_LEVEL")
+
+        # 已有 handler (fork 继承): 不应重复配置
+        n_before = len(root.handlers)
+        pipeline._child_logging_setup()
+        assert_eq(n_before, len(root.handlers), "已有 handler 时不应重复配置")
+    finally:
+        for h in list(root.handlers):
+            root.removeHandler(h)
+        for h in saved:
+            root.addHandler(h)
+        root.setLevel(saved_lvl)
+        if saved_env is None:
+            os.environ.pop("DOC2MD_LOG_LEVEL", None)
+        else:
+            os.environ["DOC2MD_LOG_LEVEL"] = saved_env
+
+
 CASES.extend([
     ("syslimits_linux", test_apply_system_limits_linux),
     ("syslimits_idempotent", test_apply_system_limits_idempotent),
     ("syslimits_zero_mem", test_apply_system_limits_zero_memory),
     ("syslimits_affinity_count", test_get_affinity_count),
     ("syslimits_windows_cpu_rate", test_apply_system_limits_windows_cpu_rate),
+    ("syslimits_child_logging", test_child_logging_setup),
 ])
