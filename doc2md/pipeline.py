@@ -207,6 +207,9 @@ def _detect_resources():
         #    4线程=166.2s | 8=107.5s | 12=91.8s | 16=97.7s | 21=101.1s
         # 12 为最优: 更少核数不足, 更多超订 (上下文切换 / ONNX session 锁 /
         # 内存带宽饱和). 保留 DOC2MD_OCR_THREADS 可现场覆盖调优.
+        # 注意: 真正决定速度的是**总并发 = 本线程数 x intra_op** (默认 intra_op=1).
+        # 乘积 12~16 是实测最优平台, 与怎么拆无关 (6x2=12 与 12x1=12 同速);
+        # 调大 DOC2MD_OCR_INTRA_OP 时需同步调小本值, 否则乘积超过 16 反而变慢.
         max_ocr = min(max(1, cpus - 1), 12)
         if forced_ocr:
             try:

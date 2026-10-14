@@ -148,7 +148,7 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 
 **为何还要限制 OpenCV/ONNX 内部线程**：亲和性限的是“能用哪几个核”，但不限制“开多少线程”。若 ONNX（`intra_op_num_threads`）与 OpenCV（`cv2.setNumThreads`）各按全核开线程，则与 pipeline 的 OCR ThreadPool 相乘会严重超订（N 线程 × 全核），并行退化为串行。两者均显式设为 1，并行度统一由 pipeline 的 ThreadPool 提供（见 `ocr._intra_op_value` / `_limit_cv_threads`）。
 
-**可调项（环境变量）**：`DOC2MD_CPU_PCT`（整机占用上限百分比，默认 80，同时决定亲和性核数与 Job Object 占用率）；`DOC2MD_OCR_THREADS`（OCR 线程数，默认 = 亲和性后核数 - 1）。
+**可调项（环境变量）**：`DOC2MD_CPU_PCT`（整机占用上限百分比，默认 80，同时决定亲和性核数与 Job Object 占用率）；`DOC2MD_OCR_THREADS`（OCR 线程数，默认 `min(核数-1, 12)`，实测 12 为最优）；`DOC2MD_OCR_INTRA_OP`（ONNX 单 session 线程，默认 1）。注意 **OCR 实际并发 = `DOC2MD_OCR_THREADS` × `DOC2MD_OCR_INTRA_OP`**，实测乘积 12~16 为最优平台（与怎么拆无关），调大一个需同步调小另一个，否则乘积超出反而变慢。
 
 ### 4.5 Parser 不加载 OCR 引擎，占位 + 收尾替换
 
