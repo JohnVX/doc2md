@@ -9,6 +9,14 @@ DOC2MD_OCR_INTRA_OP 可调), 并 monkey-patch InferenceSession 兜底.
 必须改 session 选项. 详见 _intra_op_value / _new_engine.
 
 并行由 pipeline 的 ThreadPool 提供 (ONNX run() 线程安全, 共享单实例引擎).
+
+已探明不再优化的项 (诊断结论, 避免重复返工):
+  - 单图拆解: rec(识别) 70% / det(检测) 29% / Python 胶水 0.1%. rec 单独并发达 8.73x,
+    但 det-only 仅 ~2.6x -> det 是木桶短板. det 内部 infer(卷积) 占 99%, 非 Python/GIL.
+  - det 模型约 400 算子, 无单一慢操作可重写, ORT 图优化已最高级. 降 limit_side_len
+    可提速但必丢小字 (与精度优先冲突); 且 det 仅占 29%, 上限 ~+29% 非数量级收益.
+  - 跨图片调大 rec_batch_num: 实测反而慢 2 倍多 (批越大越易混入超宽框,
+    整批被 pad 到 max_wh_ratio 宽度). 故未采纳.
 """
 import logging
 import os
@@ -99,10 +107,11 @@ def _intra_op_single():
 
 
 # OCR 单个推理 session 的 intra_op 线程数.
-# 实测 (Windows 28核, 真实155图, 12 ThreadPool 线程) 对比:
+# 实测 (Windows 28核, 真实图, 12 ThreadPool 线程) 对比:
 #   intra_op=1 -> 78.9s; 2 -> 66.3s; 4 -> 60.0s; 全核(0) -> 148.6s (灾难)
 # 全核确认最差 (超订); 但 1 与 4 的差异在测量噪声范围内, 且真实端到端
 # 收益不大 (~15-20s), 故保守取 1. 环境变量 DOC2MD_OCR_INTRA_OP 可调优.
+# 综合效果 (本项 + 全局池调度, 未改算法): OCR 250.6s -> 91.5s, 端到端 256s -> 97s (~2.6x).
 def _intra_op_value():
     try:
         v = int(os.environ.get("DOC2MD_OCR_INTRA_OP", "1"))
