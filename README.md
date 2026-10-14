@@ -2,7 +2,7 @@
 
 把 txt / md / docx / pptx / xlsx / pdf / png 等异构资料，**自动、确定性地**转换成一套对大模型 Agent 友好的知识库：全局索引 + Markdown 正文 + 原件兜底。
 
-处理器**自身不依赖任何大模型**——纯规则驱动、纯本地执行。它做确定性能做好的事（格式统一、文字提取、去噪、OCR），做不好的诚实标记并保留原件，让多模态大模型在第二阶段知情接手。
+处理器**自身不依赖任何大模型**——纯规则驱动、纯本地执行。它做确定性能做好的事（格式统一、文字提取、OCR、去噪、分类、索引），做不好的诚实标记并保留原件，让多模态大模型在第二阶段知情接手。
 
 > **核心信条**：stage 1 的工作总是有益的，对后续处理是无害的。
 
@@ -28,11 +28,11 @@
  │   Stage 1    │ ──────────────────▶ │   Stage 2    │
  │  doc2md      │   catalog + handoff  │  多模态大模型  │
  │  确定性提取   │ ◀────────────────── │  语义理解/精修 │
- └──────────────┘    四处同步更新结果   └──────────────┘
+ └──────────────┘     标记/工作单回传     └──────────────┘
 ```
 
 - **Stage 1（本处理器）**：格式统一 → 文字提取 → OCR → 去噪 → 分类 → 索引。全部确定性，结果可复现。
-- **Stage 2（另做）**：图片语义理解、公式渲染、复杂版面精修。按 handoff 契约逐项接手，四处同步更新。
+- **Stage 2（另做）**：图片语义理解、公式渲染、复杂版面精修。按 handoff 契约逐项接手（见第六节）。
 
 Stage 1 做不好的地方，用 `<!-- stage2:type=count note -->` 标记 + `deferred` 结构化字段三重表达，让 stage 2 可编程统一处理。
 
@@ -219,7 +219,7 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 
 ### handoff.yaml — 交接说明 + 工作单
 
-面向**仅 stage2 agent**。读此一处即获取全部：`producer` 身份、`stage1_done` / `stage1_not_done` 边界、`deferred_contract`（10 种类型的 where/source/action）、`procedure`（6 步流程）、`termination`（完成 / `blocked` / 幂等终止条件）、`loc_field`（定位字段说明）、`output_guide`（四处同步更新，见第六节）、`layout`（路径布局）、`stage2_pending` 工作单。
+面向**仅 stage2 agent**。读此一处即获取全部：`producer` 身份、`stage1_done` / `stage1_not_done` 边界、10 种类型的 `deferred_contract`（where/source/action）、`procedure`（6 步流程）、`termination`（完成 / `blocked` / 幂等终止条件）、`loc_field`（定位字段说明）、`output_guide`（四处同步更新，见第六节）、`layout`（路径布局）、`stage2_pending` 工作单。
 
 ### front-matter
 
@@ -248,7 +248,7 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 
 同一文档内多个同类型项经 `aggregate_deferred` 合并（count 求和）；若各项带 `loc` 定位线索（PDF 页号 / xlsx sheet 名），合并为 `locs` 列表，**位置不丢**。无待处理项的文档不输出 `deferred` 字段，不产生噪声。
 
-**stage2 的完整契约在 `handoff.yaml`**：`deferred_contract`（10 种类型的 where/source/action）、`procedure`（6 步流程）、`termination`（完成/`blocked`/幂等三种终止条件）、`loc_field`、`output_guide`、`layout`、`stage2_pending`。契约与代码内的 `DEFER_TYPES` 由启动时一致性校验 + 回归测试守护，不会出现“代码有类型、契约无说明”。
+**契约与代码的一致性**：handoff 的 `deferred_contract` 与代码内的 `DEFER_TYPES` 由启动时校验 + 回归测试守护，不会出现“代码有类型、契约无说明”。
 
 **处理后四处同步**：同一 defer 事实在制品中有 4 份副本，stage2 完成一项后需同步更新 4 处，漏一处制品即不一致：
 
@@ -396,7 +396,6 @@ stage 1 原则：**确定性工作总是有益、对后续无害**。
 
 **已知精度限制（不丢字、只影响结构/顺序，原件可回看）：**
 - PDF 复杂多栏版面：文字都在，多栏阅读序可能错乱
-- xlsx 单 sheet 超 2000 行或 100 列：截断（已 defer 标记，见上），stage2 读原件补全
 - 极少数混合编码文本可能需复核
 
 ---
