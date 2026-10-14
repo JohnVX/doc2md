@@ -219,7 +219,7 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 
 ### handoff.yaml — 交接说明 + 工作单
 
-面向**仅 stage2 agent**。读此一处即获取全部：producer 身份、stage1 做了/没做什么、10 种 defer 类型的处理契约（where/source/action）、6 步操作流程、`stage2_pending` 具体工作项、四处同步更新指南。
+面向**仅 stage2 agent**。读此一处即获取全部：`producer` 身份、`stage1_done` / `stage1_not_done` 边界、`deferred_contract`（10 种类型的 where/source/action）、`procedure`（6 步流程）、`termination`（完成 / `blocked` / 幂等终止条件）、`loc_field`（定位字段说明）、`output_guide`（四处同步更新，见第六节）、`layout`（路径布局）、`stage2_pending` 工作单。
 
 ### front-matter
 
@@ -249,6 +249,13 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 同一文档内多个同类型项经 `aggregate_deferred` 合并（count 求和）；若各项带 `loc` 定位线索（PDF 页号 / xlsx sheet 名），合并为 `locs` 列表，**位置不丢**。无待处理项的文档不输出 `deferred` 字段，不产生噪声。
 
 **stage2 的完整契约在 `handoff.yaml`**：`deferred_contract`（10 种类型的 where/source/action）、`procedure`（6 步流程）、`termination`（完成/`blocked`/幂等三种终止条件）、`loc_field`、`output_guide`、`layout`、`stage2_pending`。契约与代码内的 `DEFER_TYPES` 由启动时一致性校验 + 回归测试守护，不会出现“代码有类型、契约无说明”。
+
+**处理后四处同步**：同一 defer 事实在制品中有 4 份副本，stage2 完成一项后需同步更新 4 处，漏一处制品即不一致：
+
+1. **md body** — 标记替换为实际内容
+2. **md front-matter 的 `deferred`** — 移除该项
+3. **catalog.yaml 该文档的 `deferred`** — 移除该项
+4. **handoff.yaml 的 `stage2_pending`** — 移除该工作项
 
 ---
 
