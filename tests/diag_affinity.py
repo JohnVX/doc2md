@@ -1,13 +1,17 @@
-"""诊断: 为何 Windows 上 CPU 亲和性/占用率限制未生效.
+"""诊断: Windows OCR 阶段 CPU 到底占多少核 (不靠任务管理器, 用真实 CPU 时间).
 
-用与 pipeline._apply_system_limits 完全一致的 ctypes 签名调用,
-打印每一步的真实返回值与 GetLastError. 定位后删除.
+先设 16 核亲和性, 然后用多线程跑真实 ONNX/OpenCV 工作, 通过
+time.process_time() 测出进程实际用掉的 CPU 秒数, 除以墙钟得真实核数.
+若亲和性生效, 结果必然 <= 16; 任务管理器显示的百分比只是 16*100/28=57%.
 
 跑法: python tests/diag_affinity.py
 """
 import ctypes
+import os
 import sys
+import time
 from ctypes import wintypes
+from concurrent.futures import ThreadPoolExecutor
 
 k = ctypes.WinDLL("kernel32", use_last_error=True)
 k.GetCurrentProcess.restype = wintypes.HANDLE
@@ -19,29 +23,43 @@ k.GetProcessAffinityMask.argtypes = [
 k.GetProcessAffinityMask.restype = wintypes.BOOL
 
 h = k.GetCurrentProcess()
-print("GetCurrentProcess handle =", h)
-
-# 先读设置的"系统掩码"(进程最多能用哪些核)
-pa, sa = ctypes.c_size_t(), ctypes.c_size_t()
-ok = k.GetProcessAffinityMask(h, ctypes.byref(pa), ctypes.byref(sa))
-print(f"[before] GetProcessAffinityMask ok={bool(ok)} err={ctypes.get_last_error()}")
-print(f"[before] proc_bits={bin(pa.value).count('1')} sys_bits={bin(sa.value).count('1')}")
-
-# 设置 16 核亲和性 (与代码一致)
-mask = (1 << 16) - 1
+cpu_count = os.cpu_count()
+budget = max(2, int(cpu_count * 0.6))
+mask = (1 << budget) - 1
 ok = k.SetProcessAffinityMask(h, mask)
-err = ctypes.get_last_error()
-print(f"[set16] SetProcessAffinityMask(mask={mask:#x}) ok={bool(ok)} err={err}")
+pa, sa = ctypes.c_size_t(), ctypes.c_size_t()
+k.GetProcessAffinityMask(h, ctypes.byref(pa), ctypes.byref(sa))
+proc_bits = bin(pa.value).count("1")
+print(f"cpu_count={cpu_count} budget={budget} set_ok={bool(ok)} proc_bits={proc_bits}")
+print(f"若限制生效: 进程最多用 {proc_bits} 核, 整机占比 <= {proc_bits*100//cpu_count}%")
 
-# 再读, 看是否真的变成 16
-pa2, sa2 = ctypes.c_size_t(), ctypes.c_size_t()
-ok2 = k.GetProcessAffinityMask(h, ctypes.byref(pa2), ctypes.byref(sa2))
-print(f"[after]  GetProcessAffinityMask ok={bool(ok2)} err={ctypes.get_last_error()}")
-print(f"[after]  proc_bits={bin(pa2.value).count('1')} sys_bits={bin(sa2.value).count('1')}")
+# 用 numpy 做释放 GIL 的原生计算 (模拟 ONNX/OpenCV 的重计算)
+try:
+    import numpy as np
+except ImportError:
+    print("需要 numpy: pip install numpy")
+    sys.exit(1)
 
-# 是否已在某个 Job Object 中 (Windows 11 终端/某些环境会套 Job)
-injob = wintypes.BOOL()
-k.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
-k.IsProcessInJob.restype = wintypes.BOOL
-k.IsProcessInJob(h, None, ctypes.byref(injob))
-print("IsProcessInJob =", bool(injob.value))
+
+def _work(_):
+    # 矩阵乘 + FFT: 纯 C 实现, 不占 GIL, 能真并行
+    a = np.random.rand(400, 400)
+    b = np.random.rand(400, 400)
+    t0 = time.time()
+    n = 0
+    while time.time() - t0 < 3.0:
+        np.dot(a, b)
+        np.fft.fft2(a)
+        n += 1
+    return n
+
+
+for nthreads in (4, 12, 24):
+    t_cpu0 = time.process_time()
+    t_wall0 = time.time()
+    with ThreadPoolExecutor(max_workers=nthreads) as pool:
+        list(pool.map(_work, range(nthreads)))
+    wall = time.time() - t_wall0
+    cpu = time.process_time() - t_cpu0
+    print(f"{nthreads:2d} 线程: wall={wall:.2f}s cpu={cpu:.2f}s "
+          f"-> 实际用核 {cpu/wall:.2f} 核 (整机 {cpu/wall/cpu_count*100:.0f}%)")
