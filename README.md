@@ -81,7 +81,7 @@ Stage 1 做不好的地方，用 `<!-- stage2:type=count note -->` 标记 + `def
 doc2md/
 ├── cli.py          CLI 入口 + 零参数自动检测 + 跨平台适配
 ├── pipeline.py     主流程编排 (预处理→解析→OCR→写出→清理→索引)
-├── detector.py     内容签名格式识别 (13 种可解析 + 5 类兜底/不支持)
+├── detector.py     内容签名格式识别 (按二进制签名/zip 内部结构判定)
 ├── parsers/        各格式解析器 (统一签名, 统一返回结构)
 │   ├── __init__.py   解析器注册表 (handler 名 -> parse 函数)
 │   ├── _common.py    共享: md 表格 / defer 标记 / 聚合
@@ -230,7 +230,7 @@ config 默认 `-1` = 不写该项 → ORT 用全部核心）。修复必须
 
 ### handoff.yaml — 交接说明 + 工作单
 
-面向**仅 stage2 agent**。读此一处即获取全部：`producer` 身份、`stage1_done` / `stage1_not_done` 边界、10 种类型的 `deferred_contract`（where/source/action）、`procedure`（6 步流程）、`termination`（完成 / `blocked` / 幂等终止条件）、`loc_field`（定位字段说明）、`output_guide`（四处同步更新，见第六节）、`layout`（路径布局）、`stage2_pending` 工作单。
+面向**仅 stage2 agent**。读此一处即获取全部：`producer` 身份、`stage1_done` / `stage1_not_done` 边界、各类型的 `deferred_contract`（where/source/action）、`procedure`（处理流程）、`termination`（完成 / `blocked` / 幂等终止条件）、`loc_field`（定位字段说明）、`output_guide`（四处同步更新，见第六节）、`layout`（路径布局）、`stage2_pending` 工作单。
 
 ### front-matter
 
@@ -240,7 +240,7 @@ config 默认 `-1` = 不写该项 → ORT 用全部核心）。修复必须
 
 ## 六、Deferred 交接协议
 
-10 种 defer 类型，每种含 where（标记与原件定位）/ source（原件在哪）/ action（该做什么）：
+每种 defer 类型含 where（标记与原件定位）/ source（原件在哪）/ action（该做什么）：
 
 | type | 含义 |
 |------|------|
