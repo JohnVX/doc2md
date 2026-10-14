@@ -114,6 +114,8 @@ doc2md/
 
 **理由**：PyMuPDF 的 `fitz.Page.find_tables()` 在 C 层有全局状态，线程不安全。多线程并发解析 PDF 会产生竞争条件。ProcessPool 隔离内存空间，彻底避免此问题。
 
+**为何不担心 spawn 开销**（与 4.3 对照）：解析是**粗粒度**任务（每文件一次），进程只创建一轮且常驻到全部解析完，spawn 开销被摊薄；而 OCR 是**大量细粒度**任务，且 Linux 下才有独立引擎的好处，故 OCR 才按平台分流（见 4.3）。
+
 ### 4.3 OCR 平台自适应：Linux ProcessPool / Windows ThreadPool
 
 **决策**：
@@ -121,8 +123,7 @@ doc2md/
 | 条件 | 模式 | 理由 |
 |------|------|------|
 | Linux + batch + 图≥50 + 多核 + 内存够 | ProcessPool | fork 轻量，各进程独立 ONNX session 无锁 |
-| 其余（含 Windows 全部） | ThreadPool | 共享单实例引擎，ONNX `run()` 释放 GIL 提供并行 |
-| Windows 始终 ThreadPool | — | spawn 开销过高，实测慢 3-5 倍 |
+| 其余（含 Windows 全部） | ThreadPool | 共享单实例引擎，ONNX `run()` 释放 GIL 提供并行；Windows 上 spawn 开销过高，实测慢 3-5 倍 |
 
 **理由**：Windows 上 `spawn` 创建新进程需重新导入所有模块 + 重新初始化 ONNX，开销远大于 fork。Linux 上 `fork` 几乎零成本，独立引擎消除 ONNX session 锁，真并行。
 
@@ -150,9 +151,7 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 
 ### 4.6 ONNX 推理线程数限制为 1（防超订）
 
-**决策**：构造 OCR 引擎时传 `RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)`；
-并 monkey-patch `onnxruntime.InferenceSession` 兜底，强制覆盖调用方传入的
-`sess_options`。默认值 1，可用环境变量 `DOC2MD_OCR_INTRA_OP` 覆盖。
+**决策**：主路径在构造时直接传 `RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)`（rapidocr 会读该 config 写入 `sess_options`，最可靠）；另 monkey-patch `onnxruntime.InferenceSession` 兜底，防旧版 rapidocr 不支持 kwarg。默认值 1，可用环境变量 `DOC2MD_OCR_INTRA_OP` 覆盖。
 
 **理由**：不限制时，每个 ONNX 推理默认起全部核心数个线程，与 ThreadPool 相乘
 造成**线程超订**（12 线程 × 全核 16 = 192 线程抢 16 核），并行反退化为准串行。
