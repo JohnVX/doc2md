@@ -198,17 +198,23 @@ def _detect_resources():
     batch_mode = avail_mb >= 4096
     forced_ocr = os.environ.get("DOC2MD_OCR_THREADS")
     if batch_mode:
-        # 解析阶段与 OCR 阶段不同时 (解析早已完成并 shutdown pool), 故 OCR 可
-        # 拿满所限核数; 不再打 3/4 折扣 (旧值浪费了 1/4 算力, 实测 12 线程
-        # 只能跑出 9.3 核). 留 1 核给主线程收尾/IO.
-        max_ocr = max(1, cpus - 1)
+        # 解析与 OCR 是**先后两个阶段** (解析全部完成后 shutdown pool 才开 OCR),
+        # 故各自按满预算算, 不互相挤占. 旧式 cpus-max_ocr 会让 OCR 大时解析只剩
+        # 1 进程 (实测解析 6.0s -> 11.8s), 无谓拖慢.
+        # 解析: 进程数受核数/内存/文件数限, 上限 8 (防 spawn 开销与内存暴涨).
+        max_workers = min(cpus, max(1, avail_mb // 500), 8)
+        # OCR: 默认不超过 12 线程. 实测 (28核, 156 图) 对比:
+        #   12 线程 = 9.3 核 / 90.9s
+        #   21 线程 = 19.3 核 / 101.1s (更慢)
+        # 说明有效并行在 ~10 核附近饱和 (ONNX session 锁 / 内存带宽),
+        # 盲目加线程只会超订. 保留 DOC2MD_OCR_THREADS 可现场覆盖调优.
+        max_ocr = min(max(1, cpus - 1), 12)
         if forced_ocr:
             try:
                 max_ocr = max(1, int(forced_ocr))
             except ValueError:
                 pass
         max_ocr = min(max_ocr, max(1, ocr_budget_mb // 200))
-        max_workers = min(cpus * 2, max(1, avail_mb // 500), 8, max(1, cpus - max_ocr))
     else:
         max_ocr = min(max(1, cpus), max(1, ocr_budget_mb // 200))
         if forced_ocr:
