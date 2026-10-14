@@ -459,10 +459,6 @@ pip install -r requirements.txt
 | PyYAML | config/manifest/catalog/front-matter |
 | rapidocr-onnxruntime | OCR（可选增强；不装则图片 defer） |
 
-库内不直接使用 Pillow / psutil：Pillow 为 python-pptx 的传递依赖；内存嗅探优先 psutil、缺失时自动回退平台 API（Windows ctypes / Linux `/proc/meminfo`）。
-
-无 tesseract / pandoc / libreoffice / torch / paddle——都不需要。
-
 **Windows**：命令行使用 `python`（多数 Windows 环境无 `python3` 别名）；CLI 自动重配 stdout/stderr 为 utf-8；输出统一 LF 行尾；doc-id 跨平台稳定。
 
 **macOS**：不在支持范围。可尝试运行，但**无系统级资源限制**——CPU 亲和性、内存硬上限均不生效，且代码中无 darwin 分支，行为未经验证。
