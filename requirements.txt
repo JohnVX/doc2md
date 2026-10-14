@@ -1,4 +1,4 @@
-# doc2md 依赖 (跨平台: Linux / Windows / macOS, Python 3.9+)
+# doc2md 依赖 (支持平台: Linux / Windows, Python 3.9+)
 # 安装: pip install -r requirements.txt
 # OCR 是可选增强: 不装 rapidocr-onnxruntime 时处理器照常运行(图片 defer 到 stage2)
 

@@ -463,7 +463,7 @@ pip install -r requirements.txt
 
 无 tesseract / pandoc / libreoffice / torch / paddle——都不需要。
 
-**Windows**：用 `python`（非 `python3`）；CLI 自动重配 stdout/stderr 为 utf-8；输出统一 LF 行尾；doc-id 跨平台稳定。
+**Windows**：命令行使用 `python`（多数 Windows 环境无 `python3` 别名）；CLI 自动重配 stdout/stderr 为 utf-8；输出统一 LF 行尾；doc-id 跨平台稳定。
 
 **macOS**：不在支持范围。可尝试运行，但**无系统级资源限制**——CPU 亲和性、内存硬上限均不生效，且代码中无 darwin 分支，行为未经验证。
 
