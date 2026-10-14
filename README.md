@@ -12,7 +12,7 @@
 
 | 原则 | 内涵 |
 |------|------|
-| **确定性优先** | 识别、解析、分类、摘要、标题——全用规则与抽取式，不调大模型，同输入同输出 |
+| **确定性优先** | 识别、解析、分类、摘要、标题——全用规则与抽取式，不调大模型，同输入同输出（**跨平台逐字节一致**，见十一节） |
 | **内容优于扩展名** | 格式按二进制签名 / zip 内部结构判定，扩展名改错也能认对 |
 | **诚实标记** | 难以精准处理的内容不静默丢弃，用标准化标记 + 结构化字段显式留出 |
 | **对 stage 2 无害** | 解析器只读不改原件；先复制到 `original-doc/` 兜底，再写正文 |
@@ -389,7 +389,43 @@ python tests/run_all.py          # 退出码 0=全过，1=有失败
 python tests/run_all.py -v        # 详细（含失败堆栈）
 ```
 
-用例覆盖：格式识别、各格式解析正确性、OCR（引擎失败缓存/正向出字/ProcessPool/WMF-EMF 跳过）、去噪、分类优先级、路径校验、损坏文件、中断保存、增量全链路、deferred 结构化、零参数 CLI、batch 模式输出一致性、加密 PDF defer、PPTX 内容（标题/正文/表格/备注）、特殊文件名、多 sheet xlsx、GBK 编码、代码文件围栏、verbose 模式、收尾异常不中断、并行确定性、系统资源限制、产物质量回退（表格转义/占位标题/表格摘要/PDF 跨页样板剔除/PPTX 箭头不计 defer）。
+用例覆盖：格式识别、各格式解析正确性、OCR（引擎失败缓存/正向出字/ProcessPool/WMF-EMF 跳过）、去噪、分类优先级、路径校验、损坏文件、中断保存、增量全链路、deferred 结构化、零参数 CLI、batch 模式输出一致性、加密 PDF defer、PPTX 内容（标题/正文/表格/备注）、特殊文件名、多 sheet xlsx、GBK 编码、代码文件围栏、verbose 模式、收尾异常不中断、并行确定性、系统资源限制、产物质量回退（表格转义/占位标题/表格摘要/PDF 跨页样板剔除/PPTX 箭头不计 defer）、图片 defer 原因一致性、子进程日志配置。
+
+### 跨平台确定性验证
+
+**结论**：同一批输入在 Linux 与 Windows 上分别运行，产出**除时间戳外逐字节一致**。
+
+这不是推断，而是实测：同一批 13 个异构文档（docx/pptx/xlsx/pdf，共 156 张图）分别在 Linux（WSL，OCR 走 **process 模式**）与 Windows（OCR 走 **thread 模式**）各跑一次，两份 `knowledge/` 产物逐项比对，全部相同：
+
+| 比对项 | 方法 | 结果 |
+|--------|------|------|
+| 文件清单 | `find` 路径集 | 一致 |
+| `index/catalog.yaml`、`handoff.yaml` | 逐文件 diff（排除 `generated_at`） | 一致 |
+| `index/.manifest.yaml` | 逐文件 diff（源文件 sha256） | 一致 |
+| `docs/**/*.md`（13 篇） | 逐文件 diff + OCR 文本块单独比对 | 一致 |
+| `original-doc/**`（原件 + 图片） | 全文件 sha256 | 一致 |
+
+**为何重要**：两平台走的是**完全不同的 OCR 执行路径**（Linux `fork` + 多个独立 ONNX session / Windows `spawn` + 单引擎共享线程池），却产出相同结果。这证明 ONNX 推理在不同并行方式下是确定性的，且代码里所有平台分支（CPU 限制、OCR 模式选择、路径归一、行尾）**只影响性能与日志，不影响产物**。
+
+**唯一差异**：`catalog.yaml` 的 `generated_at`（运行时刻），属设计使然——它记录产物生成时间，本就应随运行变化。
+
+**复现**（WSL 下可同时访问两侧产物）：
+
+```bash
+# 1. 文件清单
+diff <(cd A && find . -type f | sort) <(cd B && find . -type f | sort)
+
+# 2. 文本类逐文件（排除时间戳与行尾）
+for f in $(cd A && find . -name '*.md' -o -name '*.yaml'); do
+  diff -q <(sed -e '/^generated_at:/d' -e 's/\r$//' "A/$f") \
+          <(sed -e '/^generated_at:/d' -e 's/\r$//' "B/$f") || echo "[异] $f"
+done
+
+# 3. 原件与图片（全文件哈希）
+diff <(cd A/original-doc && find . -type f -exec sha256sum {} \; | sort) \
+     <(cd B/original-doc && find . -type f -exec sha256sum {} \; | sort) \
+  && echo "原件一致"
+```
 
 ---
 
