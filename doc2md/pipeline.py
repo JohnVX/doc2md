@@ -87,12 +87,30 @@ def _ocr_proc_init():
 
 
 def _ocr_proc_worker(asset_path_str):
-    """ProcessPool OCR worker: 读图→检测格式→OCR. 返回文本或 ''(defer)."""
+    """ProcessPool OCR worker: 读图→检测格式→OCR. 返回文本或 ''(defer).
+
+    空串不区分原因(缺失/不支持/无文字); 调用方 _post_ocr 用 asset 路径重判, 故
+    worker 与父进程间无需传原因 (简化跨进程负载).
+    """
     from pathlib import Path
     p = Path(asset_path_str)
     if not p.exists():
         return ""
     blob = p.read_bytes()
+    if not ocr.is_ocr_supported(blob):
+        return ""
+    return ocr.ocr_image(blob)
+
+
+def _ocr_asset_text(m, adir):
+    """单张图 OCR (直算路径): 缺失/不支持的图返回 '' (具体原因由 _post_ocr 重判)."""
+    asset_path = adir / m.group(2)
+    if not asset_path.exists():
+        return ""
+    try:
+        blob = asset_path.read_bytes()
+    except Exception:
+        return ""
     if not ocr.is_ocr_supported(blob):
         return ""
     return ocr.ocr_image(blob)
@@ -398,7 +416,9 @@ def _precompute_ocr(jobs, out):
     """跨文档全局 OCR 预计算 (thread 模式): 一个池跑完所有文档的所有图片.
 
     jobs: [(doc_id, dest, asset_path_str), ...] 全量 OCR 任务.
-    结果写入 _ocr_text_cache[(doc_id, dest)] = 文本或 None(无文字/跳过).
+    结果写入 _ocr_text_cache[(doc_id, dest)] = 文本或 None(空结果显示/跳过).
+    None 不区分原因(缺失/不支持/无文字); _post_ocr 消费时用 asset 路径重判,
+    保证与直算路径 note 一致 (见 test_ocr_mode::ocr_defer_reason_consistent).
 
     为何要全局池: 逐文档新建 ThreadPool 会让每个文档末尾出现并行度空洞
     (文档图数 < 线程数时尾部跑不满), 文档越多空洞越明显. 全局池把全部图
@@ -447,11 +467,36 @@ def _post_ocr(body, out, doc_id, deferred_list):
     if not matches:
         return body
 
-    def make_repl(m, txt):
+    def defer_reason(m, reason=None):
+        """构造 defer 标记 (无 OCR 文本时). reason 为空则不带 note."""
         ocr_type = m.group(1)
+        dtype = "scan-page" if ocr_type == "scan" else "image-ocr"
+        if reason:
+            return defer(deferred_list, dtype, 1, reason)
+        return defer(deferred_list, dtype, 1)
+
+    def empty_text_reason(m):
+        """OCR 结果为空的真正原因 (就地重判, 避免并行 worker 丢信息).
+
+        worker (process / 预计算) 把"文件丢失""格式不支持""无文字"都压成
+        空文本, 无法区分. 此处用 asset 路径重新判定, 与单图直算路径
+        (ocr_one) 口径一致, 保证 batch/process/流式三种模式 note 相同.
+        """
+        asset_path = adir / m.group(2)
+        if not asset_path.exists():
+            return "资产文件丢失"
+        try:
+            blob = asset_path.read_bytes()
+        except Exception:
+            return "资产文件读取失败"
+        if not ocr.is_ocr_supported(blob):
+            return "WMF/EMF格式不支持OCR"
+        return ""  # OCR 已跑但未检出文字
+
+    def make_repl(m, txt):
         if txt:
             return f"```\n{txt}\n```"
-        return defer(deferred_list, "scan-page" if ocr_type == "scan" else "image-ocr", 1)
+        return defer_reason(m, empty_text_reason(m))
 
     # 预计算命中: 直接查表 (全局池已跑完)
     if _ocr_text_cache and OCR_MODE != "process":
@@ -465,14 +510,7 @@ def _post_ocr(body, out, doc_id, deferred_list):
                 replacements.append(make_repl(m, None))
     else:
         def ocr_one(m):
-            ocr_type, dest = m.group(1), m.group(2)
-            asset_path = adir / dest
-            if not asset_path.exists():
-                return defer(deferred_list, "scan-page" if ocr_type == "scan" else "image-ocr", 1, "资产文件丢失")
-            blob = asset_path.read_bytes()
-            if not ocr.is_ocr_supported(blob):
-                return defer(deferred_list, "scan-page" if ocr_type == "scan" else "image-ocr", 1, "WMF/EMF格式不支持OCR")
-            return make_repl(m, ocr.ocr_image(blob))
+            return make_repl(m, _ocr_asset_text(m, adir))
 
         # ProcessPool: 多进程并行
         if OCR_MODE == "process" and _ocr_pool is not None and len(matches) >= 2:

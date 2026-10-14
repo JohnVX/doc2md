@@ -4,9 +4,11 @@ ProcessPool: Linux + batch + 图数≥50 + 内存够每进程 400MB.
 Windows: 始终 ThreadPool (spawn 开销过高, 实测慢 3-5 倍).
 worker 数 = min(CPU预算, 图数//10), 确保每 worker ≥10 图摊薄启动.
 """
+import os
 import sys
+from pathlib import Path
 
-from tests._runner import assert_eq, assert_true
+from tests._runner import (assert_eq, assert_true, cleanup, make_tmp_output)
 
 from doc2md import pipeline
 
@@ -97,6 +99,63 @@ def test_windows_always_thread():
         sys.platform = old
 
 
+def test_defer_reason_consistent_across_paths():
+    """回归: 图片 defer 的 note 在"缓存(批量预计算)"与"直算"路径下必须一致.
+
+    真实缺陷: 并行 worker (_ocr_proc_worker / _precompute_ocr.work) 把
+    "文件丢失""格式不支持""无文字"三种原因都压成空串, _post_ocr 无法区分,
+    导致 batch(默认) 与 process 模式下 note 恒为空, 而流式路径却有原因.
+    同一输入因内存量级不同而产出不同质量的 defer, stage2 丢失决策信息.
+    修复: _post_ocr 拿到空文本时用 asset 路径就地重判原因.
+    """
+    out = make_tmp_output()
+    try:
+        doc_id = "doc-test"
+        adir = os.path.join(out, "original-doc", f"{doc_id}_assets")
+        os.makedirs(adir, exist_ok=True)
+        # WMF 图: 顺序\x9a\xc6\xcd\xd7 为 magic (见 ocr.is_ocr_supported)
+        wmf = b"\xd7\xcd\xc6\x9a" + b"\x00" * 100
+        body = "text\n<!-- ocr:img:a.wmf -->\n"
+
+        old_mode = pipeline.OCR_MODE
+        old_cache = pipeline._ocr_text_cache
+        try:
+            pipeline.MAX_OCR_THREADS = 1
+            pipeline._ocr_pool = None
+
+            # 直算路径 (无缓存)
+            with open(os.path.join(adir, "a.wmf"), "wb") as f:
+                f.write(wmf)
+            pipeline.OCR_MODE = "thread"
+            pipeline._ocr_text_cache = {}
+            dl_direct = []
+            pipeline._post_ocr(body, Path(out), doc_id, dl_direct)
+
+            # 缓存路径 (模拟预计算返回 None)
+            pipeline._ocr_text_cache = {(doc_id, "a.wmf"): None}
+            dl_cache = []
+            pipeline._post_ocr(body, Path(out), doc_id, dl_cache)
+
+            assert_eq(1, len(dl_direct), "直算路径应有 1 项 defer")
+            assert_eq(1, len(dl_cache), "缓存路径应有 1 项 defer")
+            assert_eq(dl_direct[0]["note"], dl_cache[0]["note"],
+                      "两条路径的 note 必须一致")
+            assert_eq("WMF/EMF格式不支持OCR", dl_cache[0]["note"],
+                      "缓存路径也必须给出具体原因")
+
+            # 文件丢失 -> 另一种原因
+            os.unlink(os.path.join(adir, "a.wmf"))
+            dl_missing = []
+            pipeline._post_ocr(body, Path(out), doc_id, dl_missing)
+            assert_eq("资产文件丢失", dl_missing[0]["note"],
+                      "文件丢失应给出对应原因, 而非空 note")
+        finally:
+            pipeline.OCR_MODE = old_mode
+            pipeline._ocr_text_cache = old_cache
+    finally:
+        cleanup(out)
+
+
 CASES.extend([
     ("ocr_mode_few_images_thread", test_few_images_thread),
     ("ocr_mode_threshold_50_process", test_threshold_50_process),
@@ -109,4 +168,5 @@ CASES.extend([
     ("ocr_mode_boundary_49", test_boundary_49_thread),
     ("ocr_mode_boundary_50", test_boundary_50_process),
     ("ocr_mode_windows_always_thread", test_windows_always_thread),
+    ("ocr_defer_reason_consistent", test_defer_reason_consistent_across_paths),
 ])
