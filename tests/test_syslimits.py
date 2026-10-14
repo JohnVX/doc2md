@@ -77,9 +77,48 @@ def test_get_affinity_count():
         os.sched_setaffinity(0, old_aff)
 
 
+def test_apply_system_limits_windows_cpu_rate():
+    """Windows: Job Object CPU 占用率硬上限应设置成功(限核之外, 真限占用率).
+
+    验证: 调用后读回 JobObjectCpuRateControlInformation, 确认 Enable|HardCap
+    生效且 CpuRate 在合理范围.
+    """
+    if sys.platform != "win32":
+        raise SkipTest("仅 Windows")
+    import ctypes
+    from ctypes import wintypes
+
+    total = os.cpu_count() or 2
+    pipeline._apply_system_limits(max(2, int(total * 0.6)), total, 8192)
+    assert_true(pipeline._job_handle is not None, "Job Object 应创建成功")
+
+    class _CpuRateControl(ctypes.Structure):
+        _fields_ = [("ControlFlags", wintypes.DWORD),
+                    ("CpuRate", wintypes.DWORD),
+                    ("Weight", wintypes.WORD),
+                    ("Reserved", wintypes.WORD)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+        wintypes.DWORD, ctypes.c_void_p]
+    k32.QueryInformationJobObject.restype = wintypes.BOOL
+    crc = _CpuRateControl()
+    ret = ctypes.c_ulong(0)
+    ok = k32.QueryInformationJobObject(
+        pipeline._job_handle, 15, ctypes.byref(crc),
+        ctypes.sizeof(crc), ctypes.byref(ret))
+    assert_true(bool(ok), "QueryInformationJobObject(CPU rate) 应成功")
+    ENABLE, HARD_CAP = 0x1, 0x4
+    assert_true(bool(crc.ControlFlags & ENABLE), "CPU rate control 应启用")
+    assert_true(bool(crc.ControlFlags & HARD_CAP), "应为 HARD_CAP 模式")
+    assert_true(0 < crc.CpuRate <= 10000, f"CpuRate 应合理: {crc.CpuRate}")
+
+
 CASES.extend([
     ("syslimits_linux", test_apply_system_limits_linux),
     ("syslimits_idempotent", test_apply_system_limits_idempotent),
     ("syslimits_zero_mem", test_apply_system_limits_zero_memory),
     ("syslimits_affinity_count", test_get_affinity_count),
+    ("syslimits_windows_cpu_rate", test_apply_system_limits_windows_cpu_rate),
 ])

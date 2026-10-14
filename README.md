@@ -138,10 +138,12 @@ ThreadPool，而是 finalize 前用**一个全局 ThreadPool** 跑完所有文�
 
 | 层级 | 作用 | Windows | Linux |
 |------|------|---------|-------|
-| 系统级（硬上限） | 安全网，防 CPU 100% / OOM | `SetProcessAffinityMask` (60% 核) + Job Object (内存硬上限) | `sched_setaffinity` (60% 核) + `RLIMIT_AS` (4GB+/进程) |
+| 系统级（硬上限） | 安全网，防 CPU 100% / OOM | `SetProcessAffinityMask` (60% 核) + Job Object（内存硬上限 + **CPU 占用率硬上限**） | `sched_setaffinity` (60% 核) + `RLIMIT_AS` (4GB+/进程) |
 | 应用级（优化） | 读亲和性后实际核数，决定 spawn 几个进程 | `_get_affinity_count()` | `_get_affinity_count()` |
 
 **理由**：系统级限制子进程自动继承，ONNX/OpenCV 内部线程也无法绕过——这是安全网。应用级读亲和性后的实际核数来决定并行度——避免进程数 > 核数导致的上下文切换。两层互补，缺一不可：只有系统级没有应用级 → 进程数仍可能过多；只有应用级没有系统级 → ONNX 内部线程不受控。
+
+**为何亲和性不足、需再加 CPU 占用率上限**：亲和性只规定“能用哪几个核”（限核），这 N 个核仍会被跑满，故任务管理器里常见 **90%+**。真正的占用率限制靠 Job Object 的 `JobObjectCpuRateControlInformation`（InfoClass 15，Win8+，`ENABLE|HARD_CAP`），按**系统总 CPU 百分比**限整个进程树。两套同时生效：亲和性隔离核心、占用率封顶（Linux 侧无等价非 root API，但亲和性 + 小并发已足够）。
 
 ### 4.5 Parser 不加载 OCR 引擎，占位 + 收尾替换
 

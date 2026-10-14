@@ -203,6 +203,8 @@ def _apply_system_limits(cpu_budget, cpus, avail_mb):
       1. CPU 亲和性: SetProcessAffinityMask → 只用 cpu_budget 个核心.
          子进程继承掩码, ONNX/OpenCV 内部线程也无法绕过.
       2. Job Object: 内存硬上限 (整个进程树 commit 总量, 超限则分配失败).
+      3. Job Object CPU 占用率硬上限 (Win8+): cpu_budget/cpus 比例, 子进程继承.
+         亲和性只限核数(限住的核仍会跑满), 本项才限真正的 CPU 占用率.
     Linux:
       1. CPU 亲和性: sched_setaffinity.
       2. RLIMIT_AS: 单进程虚拟地址空间上限 (防泄漏, 非 tree-wide; tree-wide 需 cgroups/root).
@@ -297,6 +299,37 @@ def _apply_system_limits(cpu_budget, cpus, avail_mb):
                     err = ctypes.get_last_error()
                     step = "SetInformationJobObject" if not ok1 else "AssignProcessToJobObject"
                     log.warning("%s失败 (GetLastError=%d)", step, err)
+
+                # 3. CPU 占用率硬上限 (JobObjectCpuRateControlInformation, Win8+).
+                # 亲和性只限“用哪几个核”, 这 N 个核仍会被跑满; 本项才真正限制
+                # 整个进程树的 CPU **占用率** (按系统总 CPU 的百分比计).
+                # ControlFlags = ENABLE(0x1) | HARD_CAP(0x4); CpuRate 单位为 1/100 百分比.
+                if ok1 and ok2:
+                    try:
+                        class _CpuRateControl(ctypes.Structure):
+                            _fields_ = [("ControlFlags", wintypes.DWORD),
+                                        ("CpuRate", wintypes.DWORD),
+                                        ("Weight", wintypes.WORD),
+                                        ("Reserved", wintypes.WORD)]
+
+                        JOB_OBJECT_CPU_RATE_CONTROL_ENABLE = 0x1
+                        JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP = 0x4
+                        rate = max(1, min(10000, int(10000 * cpu_budget / max(1, cpus))))
+                        crc = _CpuRateControl()
+                        crc.ControlFlags = (JOB_OBJECT_CPU_RATE_CONTROL_ENABLE
+                                            | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP)
+                        crc.CpuRate = rate
+                        # InfoClass 15 = JobObjectCpuRateControlInformation
+                        ok3 = k32.SetInformationJobObject(
+                            hJob, 15, ctypes.byref(crc), ctypes.sizeof(crc))
+                        if ok3:
+                            parts.append(f"CPU占用上限={rate / 100:.0f}%")
+                        else:
+                            log.warning("CPU 占用率限制失败 (GetLastError=%d); "
+                                        "仅亲和性生效 (限核不限占用)",
+                                        ctypes.get_last_error())
+                    except Exception as ex:
+                        log.warning("CPU 占用率限制异常: %s", ex)
 
         except Exception as ex:
             log.warning("Job Object 异常: %s", ex)
