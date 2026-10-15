@@ -184,14 +184,44 @@ def _engine_obj():
 
 
 def is_ocr_supported(blob):
-    """检测图片格式是否可 OCR. WMF/EMF 在 Linux 无 Pillow 解码器, 直接跳过."""
+    """该图能否被 OCR 引擎读取.
+
+    WMF/EMF 等矢量图: 能否处理取决于环境能否渲染 (Windows Pillow GDI 原生;
+    Linux 需 LibreOffice/Inkscape). 不再一刀切跳过 —— 那会在 Windows 上
+    误杀本可处理的图 (平台不对称缺陷). 用 vectimg.render_vector 实测。
+    """
     if not blob or len(blob) < 4:
         return False
-    if blob[:4] == b'\xd7\xcd\xc6\x9a':  # WMF magic
-        return False
-    if blob[:4] == b'\x01\x00\x00\x00' and len(blob) > 44 and blob[40:44] == b' EMF':  # EMF
-        return False
+    from . import vectimg
+    if vectimg.is_vector_blob(blob):
+        return vectimg.render_vector(blob) is not None
     return True
+
+
+def _prepare_for_ocr(img):
+    """把输入规整为 OCR 引擎可读的形态; 不可读返回 None.
+
+    矢量图 (EMF/WMF/SVG) 渲染为 PNG 字节; 其余原样返回.
+    img: 文件路径(str) 或字节(bytes).
+    """
+    from . import vectimg
+    if isinstance(img, str):
+        try:
+            with open(img, "rb") as f:
+                blob = f.read()
+        except Exception:
+            return img  # 交给引擎报错
+    else:
+        blob = img
+    if not vectimg.is_vector_blob(blob):
+        return img
+    ext = img.rsplit(".", 1)[-1] if isinstance(img, str) and "." in img else ""
+    png = vectimg.render_vector(blob, ext)
+    if png is None:
+        log.info("矢量图无法渲染 (无 Windows GDI / LibreOffice / Inkscape): %s",
+                 img if isinstance(img, str) else "<bytes>")
+        return None
+    return png
 
 
 def ocr_image(img, ctx=None):
@@ -204,6 +234,11 @@ def ocr_image(img, ctx=None):
     会误删真实短标签, 违反"精度优先"原则; 零碎伪影保留在正文, 由 stage2
     多模态模型结合图片上下文区分.
     """
+    # 矢量图 (EMF/WMF/SVG): OCR 引擎读不了, 先渲染为 PNG 字节再送入.
+    # 无法渲染 (无 Windows GDI / 无 LibreOffice/Inkscape) 时返回 '', 上层 defer.
+    img = _prepare_for_ocr(img)
+    if img is None:
+        return ""
     if not available():
         return ""
     t0 = time.time()

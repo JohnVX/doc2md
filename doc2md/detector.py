@@ -160,7 +160,7 @@ def detect(path: str):
     except OSError:
         pass
     with open(path, "rb") as f:
-        head = f.read(8)
+        head = f.read(64)
     # 二进制: OOXML (zip)
     if head[:2] == b"PK" and head[2:4] in (b"\x03\x04", b"\x05\x06", b"\x07\x08"):
         try:
@@ -198,6 +198,11 @@ def detect(path: str):
         return {"format": "tiff", "handler": "image", "ext": ext, "meta": {}}
     if head[:2] == b"BM":
         return {"format": "bmp", "handler": "image", "ext": ext, "meta": {}}
+    # 矢量图: WMF/EMF 也路由到 image (由 vectimg 渲染为 PNG 再 OCR)
+    if head[:4] == b"\xd7\xcd\xc6\x9a":
+        return {"format": "wmf", "handler": "image", "ext": ext, "meta": {}}
+    if head[:4] == b"\x01\x00\x00\x00" and head[40:44] == b" EMF":
+        return {"format": "emf", "handler": "image", "ext": ext, "meta": {}}
     # 其余: 文本类
     fmt, handler, meta = _sniff_text(path, ext, name, stem)
     return {"format": fmt, "handler": handler, "ext": ext, "meta": meta}

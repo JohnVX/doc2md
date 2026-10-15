@@ -32,6 +32,9 @@ def guess_image_class(blob=b"", ext="", filter_name=""):
     e = (ext or "").lower().strip()
     if "." in e:
         e = e.rsplit(".", 1)[1]
+    # 文件名含 vec 前缀: 由矢量图渲染而来 (save_asset 标记), 归为 diagram
+    if "vec" in (ext or "").lower().split(".")[0].split("_"):
+        return "diagram"
     f = (filter_name or "").lower()
     head = blob[:12] if blob else b""
     if e in ("svg", "emf", "wmf") or head[:4] == b"\x01\x00\x00\x00":

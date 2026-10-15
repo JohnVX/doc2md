@@ -92,7 +92,8 @@ doc2md/
 │   ├── image.py      图片: 存图+OCR占位 (与其他 parser 一致)
 │   ├── md.py         Markdown: pass-through + 内嵌图跟进
 │   └── text.py       纯文本/代码: 编码嗅探 + 语言标注围栏
-├── ocr.py          OCR 封装: 单例引擎 + 失败缓存 + WMF/EMF 跳过
+├── ocr.py          OCR 封装: 单例引擎 + 失败缓存
+├── vectimg.py      矢量图渲染: EMF/WMF/SVG → PNG (Windows GDI / LibreOffice / Inkscape)
 ├── denoise.py      去噪 + 抽取式摘要 + 章节索引 + front-matter
 ├── config.py       配置加载 + 通用分类 (mapping>keywords>default)
 ├── catalog.py      artifact/catalog.yaml + process/handoff.yaml 生成
@@ -293,9 +294,16 @@ config 默认 `-1` = 不写该项 → ORT 用全部核心）。修复必须
 | xlsx | 每 sheet→md 表格；合并单元格展开；无缓存公式回退显示公式文本 |
 | pdf | 大纲注入章节标题；文字块按坐标排序；表格抽取(过滤伪表, 失败时降级为仅文字层)；扫描页渲染+OCR；内嵌图标记 |
 | png / jpeg / gif / webp / tiff / bmp | OCR 文本块按序拼进 md；无文字/无引擎则 defer |
+| emf / wmf / svg（矢量图） | 渲染为 PNG 后按图片处理；无渲染能力（非 Windows 且未装 LibreOffice/Inkscape）则 defer |
 | 其余（旧 office / zip / 二进制 / 空文件等） | 不解析，复制原件 + `unsupported` 标记交 stage2 |
 
 **分类**：`mapping`（文件名 glob 精确）优先 → `keywords`（文件名+正文命中数最多者胜出）→ 默认类目。
+
+### 矢量图处理
+
+EMF/WMF/SVG 是 Office 文档里的矢量图（Visio/SmartArt/剪贴画），原始格式多模态模型与 OCR 引擎都读不了。stage1 做格式归一化（不涉及“理解”）：渲染为 PNG 位图再走普通图片流程，下游即可直接使用。
+
+渲染按可用性降级，任一成功即可：**Windows 下 Pillow 原生支持**（GDI，零依赖）；Linux/macOS 则需可选工具 **LibreOffice** 或 **Inkscape**。都没有时保留原矢量 + `deferred` 标记（note 说明缺何能力）交 stage2，不阻断流程。
 
 **摘要**：抽取式——取首个像正文的段落（跳过标题/图片/注释/引用/表格行/纯列表，代码块内行不参与），截断 200 字。
 
@@ -388,6 +396,8 @@ pip install -r requirements.txt
 | PyYAML | config/manifest/catalog/front-matter |
 | rapidocr-onnxruntime | OCR（可选增强；不装则图片 defer） |
 
+**矢量图渲染（EMF/WMF/SVG）**：Windows 下 Pillow 原生支持（GDI，零依赖）；Linux 下为可选增强，装了 **LibreOffice**（`soffice`）或 **Inkscape** 才启用，否则矢量图 defer 给 stage2。
+
 **Windows**：命令行使用 `python`（多数 Windows 环境无 `python3` 别名）；CLI 自动重配 stdout/stderr 为 utf-8；输出统一 LF 行尾；doc-id 跨平台稳定。
 
 ---
@@ -401,7 +411,7 @@ python tests/run_all.py          # 退出码 0=全过，1=有失败
 python tests/run_all.py -v        # 详细（含失败堆栈）
 ```
 
-用例覆盖：格式识别、各格式解析正确性、OCR（引擎失败缓存/正向出字/ProcessPool/WMF-EMF 跳过）、去噪、分类优先级、路径校验、损坏文件、中断保存、增量全链路、deferred 结构化、零参数 CLI、batch 模式输出一致性、加密 PDF defer、PPTX 内容（标题/正文/表格/备注）、特殊文件名、多 sheet xlsx、GBK 编码、代码文件围栏、verbose 模式、收尾异常不中断、并行确定性、系统资源限制、产物质量回退（表格转义/占位标题/表格摘要/PDF 跨页样板剔除/PPTX 箭头不计 defer）、图片 defer 原因一致性、图片类别推断、子进程日志配置。
+用例覆盖：格式识别、各格式解析正确性、OCR（引擎失败缓存/正向出字/ProcessPool/矢量图）、去噪、分类优先级、路径校验、损坏文件、中断保存、增量全链路、deferred 结构化、零参数 CLI、batch 模式输出一致性、加密 PDF defer、PPTX 内容（标题/正文/表格/备注）、特殊文件名、多 sheet xlsx、GBK 编码、代码文件围栏、verbose 模式、收尾异常不中断、并行确定性、系统资源限制、产物质量回退（表格转义/占位标题/表格摘要/PDF 跨页样板剔除/PPTX 箭头不计 defer）、图片 defer 原因一致性、图片类别推断、矢量图渲染、子进程日志配置。
 
 ### 跨平台确定性验证
 

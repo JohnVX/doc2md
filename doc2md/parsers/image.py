@@ -12,7 +12,11 @@ from ._common import defer, guess_image_class
 
 
 def parse(path, ctx=None):
-    """图片解析入口: 存 assets + OCR 占位 (OCR 在 pipeline 收尾执行)."""
+    """图片解析入口: 存 assets + OCR 占位 (OCR 在 pipeline 收尾执行).
+
+    矢量图 (EMF/WMF/SVG): 先渲染为 PNG 再存 (原始矢量多模态模型读不了);
+    无法渲染则存原矢量 + 标记 (由 stage2 处理).
+    """
     ctx = ctx or {}
     stem = Path(path).stem
     rel = ctx.get("relpath") or os.path.basename(path)
@@ -25,7 +29,8 @@ def parse(path, ctx=None):
         return {"title": stem, "body": f"![{stem}]({ref})\n\n" + defer(deferred, "parse-failed", 1, "读取图片失败") + "\n",
                 "tags": [], "meta": {}, "deferred": deferred}
 
-    dest, _ = util.save_asset(blob, ctx, "png", prefix="img")
+    # 矢量图渲染由 util.save_asset 统一处理 (存 PNG 或保留原矢量)
+    dest, _ = util.save_asset(blob, ctx, (Path(path).suffix.lstrip(".") or "png"), prefix="img")
     if dest:
         body = f"![{stem}]({ref})\n\n<!-- ocr:img:{dest} -->"
     else:

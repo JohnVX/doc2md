@@ -33,11 +33,23 @@ def save_asset(data, ctx, ext, prefix="img"):
 
     返回 (dest_basename, 从 docs/<cat>/<id>.md 出发的相对引用路径).
     ctx 需含 output_root 与 doc_id. 用于内嵌图(docx/pptx/pdf 渲染页)提取兜底 + OCR.
+
+    矢量图 (EMF/WMF/SVG): 先渲染为 PNG 再存 (下游多模态模型读不了矢量);
+    渲染失败则原样存并保留原扩展名, 由上层标记 defer.
     """
     root = ctx.get("output_root") if ctx else None
     doc_id = (ctx or {}).get("doc_id", "doc")
     if not root:
         return None, None
+    # 矢量图归一化: 所有 parser 提取内嵌图都经此, 故在此统一渲染一次
+    ext = (ext or "").lstrip(".")
+    if ext in ("emf", "wmf", "svg", "emz", "wmz"):
+        from . import vectimg
+        png = vectimg.render_vector(data, ext)
+        if png is not None:
+            # 渲染成功: 存 PNG, 前缀标 vec (供 _post_ocr 推断 class=diagram,
+            # 因为渲染后的 PNG 字节已丢失"来自矢量"的信息)
+            data, ext, prefix = png, "png", "vec"
     adir = os.path.join(str(root), "original-doc", f"{doc_id}_assets")
     os.makedirs(adir, exist_ok=True)
     seq = (ctx.get("_asset_seq") or 0) + 1

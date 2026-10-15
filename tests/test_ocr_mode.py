@@ -140,8 +140,11 @@ def test_defer_reason_consistent_across_paths():
             assert_eq(1, len(dl_cache), "缓存路径应有 1 项 defer")
             assert_eq(dl_direct[0]["note"], dl_cache[0]["note"],
                       "两条路径的 note 必须一致")
-            assert_eq("WMF/EMF格式不支持OCR", dl_cache[0]["note"],
-                      "缓存路径也必须给出具体原因")
+            # 该 WMF 为合成的无效数据 (只有 magic, 无有效记录) -> 无人能渲染,
+            # 故 note 应为"矢量图无法渲染"而非旧的"格式不支持" (语义更准: 是缺
+            # 渲染能力, 不是永不支持 —— Windows GDI 能处理真 WMF).
+            assert_true("无法渲染" in dl_cache[0]["note"],
+                        "缓存路径必须给出具体原因 (缺渲染能力)")
 
             # 文件丢失 -> 另一种原因
             os.unlink(os.path.join(adir, "a.wmf"))

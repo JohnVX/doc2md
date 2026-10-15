@@ -500,8 +500,10 @@ def _post_ocr(body, out, doc_id, deferred_list):
             blob = asset_path.read_bytes()
         except Exception:
             return "资产文件读取失败"
-        if not ocr.is_ocr_supported(blob):
-            return "WMF/EMF格式不支持OCR"
+        from . import vectimg
+        if vectimg.is_vector_blob(blob):
+            if vectimg.render_vector(blob) is None:
+                return "矢量图无法渲染(需 Windows/ LibreOffice/Inkscape)"
         return ""  # OCR 已跑但未检出文字
 
     def make_repl(m, txt):

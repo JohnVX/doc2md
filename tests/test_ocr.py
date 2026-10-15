@@ -67,10 +67,16 @@ CASES.append(("ocr_positive_produces_text", test_ocr_positive_produces_text))
 
 
 def test_is_ocr_supported_wmf_emf():
-    """WMF/EMF 格式不支持 OCR, PNG 支持."""
-    assert_true(not ocr.is_ocr_supported(b'\xd7\xcd\xc6\x9a' + b'\x00' * 100), "WMF 不支持")
+    """矢量图 (WMF/EMF) 可处理性取决于能否渲染; PNG 直接支持.
+
+    注意: 合成的无效 WMF/EMF (只有 magic, 无有效记录) 无法渲染 -> 不支持;
+    真实矢量图在有渲染能力的环境 (Windows GDI / LibreOffice / Inkscape)
+    下可渲染 -> 支持. 不再一刀切因格式名跳过.
+    """
+    assert_true(not ocr.is_ocr_supported(b'\xd7\xcd\xc6\x9a' + b'\x00' * 100),
+                "无效 WMF (无法渲染) 不支持")
     emf = b'\x01\x00\x00\x00' + b'\x00' * 36 + b' EMF' + b'\x00' * 100
-    assert_true(not ocr.is_ocr_supported(emf), "EMF 不支持")
+    assert_true(not ocr.is_ocr_supported(emf), "无效 EMF (无法渲染) 不支持")
     png = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
     assert_true(ocr.is_ocr_supported(png), "PNG 支持")
     assert_true(not ocr.is_ocr_supported(b''), "空 blob 不支持")
