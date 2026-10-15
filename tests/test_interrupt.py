@@ -45,7 +45,7 @@ def test_interrupt_batch_parse():
         pipeline.MAX_OCR_THREADS = orig_o
         pipeline.BATCH_MODE = orig_b
 
-    man_path = os.path.join(out, "index", ".manifest.yaml")
+    man_path = os.path.join(out, "index", "process", ".manifest.yaml")
     assert_true(os.path.exists(man_path), "manifest 应存在")
     man = yaml.safe_load(open(man_path, encoding="utf-8"))
     assert_true(len(man["entries"]) >= 1, "manifest 应有已处理条目")
@@ -88,7 +88,7 @@ def test_interrupt_streaming_parse():
         pipeline.MAX_OCR_THREADS = orig_o
         pipeline.BATCH_MODE = orig_b
 
-    man_path = os.path.join(out, "index", ".manifest.yaml")
+    man_path = os.path.join(out, "index", "process", ".manifest.yaml")
     assert_true(os.path.exists(man_path), "manifest 应存在")
     man = yaml.safe_load(open(man_path, encoding="utf-8"))
     assert_true(len(man["entries"]) >= 1, "manifest 应有已处理条目")
@@ -125,7 +125,7 @@ def test_interrupt_batch_finalize():
         pipeline.MAX_OCR_THREADS = orig_o
         pipeline.BATCH_MODE = orig_b
 
-    man_path = os.path.join(out, "index", ".manifest.yaml")
+    man_path = os.path.join(out, "index", "process", ".manifest.yaml")
     assert_true(os.path.exists(man_path), "manifest 应存在")
     man = yaml.safe_load(open(man_path, encoding="utf-8"))
     assert_true(len(man["entries"]) >= 1, "manifest 应有已处理条目")

@@ -61,7 +61,7 @@ def test_batch_produces_correct_output():
         assert_eq(p, 6, "6 文件都应处理")
         mds = find_mds(out)
         assert_eq(len(mds), 6, "6 个 md 产物")
-        cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+        cat = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
         assert_eq(len(cat["documents"]), 6, "catalog 6 文档")
         types = sorted(d["source_type"] for d in cat["documents"])
         assert_eq(types, ["docx", "md", "pdf", "pptx", "txt", "xlsx"])

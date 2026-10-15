@@ -18,7 +18,7 @@ import re
 from pathlib import Path
 
 from .. import util
-from ._common import defer, is_placeholder, render_table
+from ._common import defer, guess_image_class, is_placeholder, render_table
 
 
 def parse(path, ctx=None):
@@ -57,7 +57,8 @@ def parse(path, ctx=None):
                 if dest:
                     out.append(f"![表格图{i}]({ref})\n\n<!-- ocr:img:{dest} -->")
                 else:
-                    out.append(defer(deferred, "image-ocr", 1, "表格内嵌图未存盘"))
+                    out.append(defer(deferred, "image-ocr", 1, "表格内嵌图未存盘",
+                                     cls=guess_image_class(blob, ext)))
             _mark_unextracted(child, deferred, out)
 
     # 浮动文本框防御 (body 之外的 drawing 里的文本)
@@ -118,7 +119,8 @@ def _render_paragraph(p, d, ctx, deferred):
             if dest:
                 chunks.append(f"![图{i}]({ref})\n\n<!-- ocr:img:{dest} -->")
             else:
-                chunks.append(defer(deferred, "image-ocr", 1, "内嵌图未存盘"))
+                chunks.append(defer(deferred, "image-ocr", 1, "内嵌图未存盘",
+                                    cls=guess_image_class(blob, ext)))
         return "\n\n".join(chunks)
     # 空段
     if not text.strip():
@@ -251,7 +253,8 @@ def _mark_unextracted(element, deferred, out):
     except Exception:
         n_eq = 0
     if n_eq:
-        out.append(defer(deferred, "formula", n_eq, "含数学公式(OMML)未提取"))
+        out.append(defer(deferred, "formula", n_eq, "含数学公式(OMML)未提取",
+                         cls="formula", unit="para"))
     # 非位图 drawing (图表/SmartArt 等): drawing 内无 a:blip 即非图片.
     # 排除文本框(含 w:txbxContent)——其文字已由 _extract_textboxes 提取, 不算未提取图形.
     n_graphic = 0
@@ -266,7 +269,8 @@ def _mark_unextracted(element, deferred, out):
     except Exception:
         n_graphic = 0
     if n_graphic:
-        out.append(defer(deferred, "chart", n_graphic, "图表/SmartArt等图形未提取"))
+        out.append(defer(deferred, "chart", n_graphic, "图表/SmartArt等图形未提取",
+                         cls="chart", unit="para"))
 
 
 # --- 脚注/尾注/批注: body 之外的独立 part, python-docx 无读取 API, 读 zip 内 XML ---

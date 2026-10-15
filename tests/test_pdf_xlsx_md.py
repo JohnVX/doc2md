@@ -71,7 +71,7 @@ def test_xlsx_row_truncation():
         assert_true("stage2:truncated" in body, "应有 truncated 标记")
         # 结构化上报: catalog 该文档应含 truncated defer (stage2 可见)
         import yaml
-        cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"),
+        cat = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"),
                                   encoding="utf-8"))
         dtypes = {d["type"] for doc in cat["documents"]
                   for d in (doc.get("deferred") or [])}

@@ -34,7 +34,7 @@ _DOC_EXTS = {".pptx", ".docx", ".xlsx", ".pdf", ".png", ".jpg", ".jpeg",
              ".c", ".h", ".py", ".sh", ".cmake", ".yaml", ".yml"}
 _EXCLUDE_NAMES = {"knowledge", "output", "out", "build", "dist",
                   "__pycache__", ".git", "node_modules", ".venv", "venv"}
-_OUTPUT_MARKER = Path("index") / "catalog.yaml"
+_OUTPUT_MARKER = Path("index") / "artifact" / "catalog.yaml"
 
 
 def _utf8_stdio():
@@ -65,7 +65,7 @@ def _count_docs(d, max_files=5000, max_docs=200):
 def _find_input_dir(cwd):
     """在 cwd 的直接子目录中启发式查找含文档最多的目录.
 
-    排除: 输出目录(含 index/catalog.yaml) / 构建/缓存目录 / 隐藏目录 / 符号链接.
+    排除: 输出目录(含 index/artifact/catalog.yaml) / 构建/缓存目录 / 隐藏目录 / 符号链接.
     返回路径字符串或 None.
     """
     candidates = []

@@ -56,8 +56,13 @@ def parse(path, ctx=None):
                      len(boilerplate), Path(path).name)
         out = []
         for i in range(n):
+            pno = i + 1
+            # 页锚点: 无条件保留页边界, 供 stage2/下游按页聚合 (PDF 无 Slide 标题,
+            # 页号是 stage1 已知结构, 保留成本≈零; 不保留则 stage2 只能靠 locs
+            # 顺序臆测页对应). 与 pptx 的 '## Slide N' 对齐.
+            anchor = f"<!-- page:{pno} -->"
             segs = []
-            for lvl, t in page_entries.get(i + 1, []):
+            for lvl, t in page_entries.get(pno, []):
                 lvl = max(1, min(6, lvl))
                 segs.append((0.0, "head", "#" * lvl + " " + t))
             segs.extend(_page_segments(doc[i], boilerplate))
@@ -67,7 +72,7 @@ def parse(path, ctx=None):
                 # 不渲染扫描页 (否则封面/分隔页会凭空产生 ![扫描页] + OCR 开销)
                 if _has_text_layer(doc[i]):
                     continue
-                out.append(_ocr_scan_page(doc[i], ctx, deferred))
+                out.append(anchor + "\n\n" + _ocr_scan_page(doc[i], ctx, deferred))
                 continue
             segs.sort(key=lambda s: s[0])
             page_md = "\n\n".join(s[2] for s in segs if s[2])
@@ -82,8 +87,8 @@ def parse(path, ctx=None):
             if n_imgs and page_md.strip():
                 page_md += "\n\n" + defer(deferred, "inline-image", n_imgs,
                                           "图内文字未提取, 见原文件",
-                                          loc=f"p{i + 1}")
-            out.append(page_md)
+                                          loc=f"p{pno}", unit="page")
+            out.append(anchor + "\n\n" + page_md)
         body = "\n\n".join(x for x in out if x)
     finally:
         if doc:

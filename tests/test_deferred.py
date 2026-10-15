@@ -12,7 +12,7 @@ import os
 import re
 import yaml
 
-from tests._runner import (assert_eq, assert_true, cleanup, find_mds,
+from tests._runner import (SkipTest, assert_eq, assert_true, cleanup, find_mds,
                             make_tmp_input, make_tmp_output, parse_front_matter,
                             read_md)
 
@@ -21,7 +21,7 @@ from doc2md.parsers._common import DEFER_TYPES, aggregate_deferred, defer
 
 CASES = []
 
-_STAGE2_RE = re.compile(r'<!-- stage2:([\w-]+)=(\d+)(?:\s+(.*?))? -->')
+_STAGE2_RE = re.compile(r'<!-- stage2:([\w-]+)=(\d+)((?:\s+\w+=[\w-]+)*)(?:\s+(.*?))? -->')
 
 
 def test_unsupported_has_structured_deferred():
@@ -75,8 +75,8 @@ def test_stage2_pending_in_handoff_not_catalog():
     out = make_tmp_output()
     pipeline.run(in_dir, out)
 
-    cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
-    hdata = yaml.safe_load(open(os.path.join(out, "index", "handoff.yaml"), encoding="utf-8"))
+    cat = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
+    hdata = yaml.safe_load(open(os.path.join(out, "index", "process", "handoff.yaml"), encoding="utf-8"))
 
     # catalog 不含 stage2_pending
     assert_true("stage2_pending" not in cat, "catalog 不应有 stage2_pending")
@@ -102,7 +102,7 @@ CASES.append(("stage2_pending_in_handoff_not_catalog", test_stage2_pending_in_ha
 
 
 def test_marker_format_parseable():
-    """所有 stage2 标记都能用统一正则提取 type/count/note."""
+    """所有 stage2 标记都能用统一正则提取 type/count/修饰/note."""
     deferred = []
     markers = [
         defer(deferred, "image-ocr", 1, "无引擎或纯图无文字"),
@@ -126,10 +126,66 @@ def test_marker_format_parseable():
     m2 = defer(deferred, "image-ocr", 1)
     matches2 = _STAGE2_RE.findall(m2)
     assert_eq(len(matches2), 1, "无 note 的标记也应可提取")
-    assert_eq(matches2[0][2], "", "无 note 时 note 为空")
+    assert_eq(matches2[0][3], "", "无 note 时 note 为空")
 
 
 CASES.append(("marker_format_parseable", test_marker_format_parseable))
+
+
+def test_marker_unit_class():
+    """标记带 unit/class 修饰: 正则能分离修饰字段与自由 note, 且进 deferred 结构."""
+    deferred = []
+    m1 = defer(deferred, "inline-image", 8, "图内文字未提取",
+               loc="p3", unit="page")
+    m2 = defer(deferred, "image-ocr", 1, cls="screenshot")
+    m3 = defer(deferred, "chart", 3, "图表未提取", cls="chart", unit="slide")
+    # 标记文本含修饰
+    assert_true("unit=page" in m1, "标记应含 unit=page")
+    assert_true("class=screenshot" in m2, "标记应含 class=screenshot")
+    # 正则可正确分离
+    r1 = _STAGE2_RE.match(m1)
+    assert_eq(r1.group(1), "inline-image", "type")
+    assert_eq(r1.group(2), "8", "count")
+    assert_eq(r1.group(3).strip(), "unit=page", "修饰字段")
+    assert_eq(r1.group(4), "图内文字未提取", "note")
+    r3 = _STAGE2_RE.match(m3)
+    assert_eq(r3.group(3).strip(), "unit=slide class=chart", "两个修饰都提取")
+    assert_eq(r3.group(4), "图表未提取", "note 与修饰分离")
+    # deferred 结构含 cls/unit
+    assert_eq(deferred[0].get("unit"), "page", "deferred 项含 unit")
+    assert_eq(deferred[1].get("cls"), "screenshot", "deferred 项含 cls")
+    # 无修饰时不产生空字段
+    d2 = []
+    defer(d2, "encrypted", 1, "x")
+    assert_true("cls" not in d2[0], "无 cls 时不产生字段")
+    assert_true("unit" not in d2[0], "无 unit 时不产生字段")
+
+
+CASES.append(("marker_unit_class", test_marker_unit_class))
+
+
+def test_guess_image_class():
+    """图片类别推断: 只用有区分度的信号, 无法判断时返回空串."""
+    from doc2md.parsers._common import guess_image_class
+    import io
+    try:
+        from PIL import Image
+    except ImportError:
+        SkipTest("无 PIL")
+    buf = io.BytesIO(); Image.new('RGB', (10, 10), 'red').save(buf, 'PNG')
+    png = buf.getvalue()
+    buf2 = io.BytesIO(); Image.new('RGB', (10, 10), 'red').save(buf2, 'JPEG')
+    jpg = buf2.getvalue()
+    # 裸扩展名与文件名两种形态都要能识别 (曾经的坑: lstrip('.') 对文件名无效)
+    assert_eq(guess_image_class(png, "png"), "screenshot")
+    assert_eq(guess_image_class(png, "01_img.png"), "screenshot")
+    assert_eq(guess_image_class(jpg, "photo.jpg"), "photo")
+    assert_eq(guess_image_class(b"", "x.emf"), "diagram")
+    assert_eq(guess_image_class(b"", "x.svg"), "diagram")
+    assert_eq(guess_image_class(b"", ""), "", "无法判断时返回空串")
+
+
+CASES.append(("guess_image_class", test_guess_image_class))
 
 
 def test_aggregate_deferred():
@@ -154,8 +210,8 @@ def test_no_deferred_for_clean_docs():
     in_dir = make_tmp_input({"clean.txt": "just text\n"})
     out = make_tmp_output()
     pipeline.run(in_dir, out)
-    cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
-    hdata = yaml.safe_load(open(os.path.join(out, "index", "handoff.yaml"), encoding="utf-8"))
+    cat = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
+    hdata = yaml.safe_load(open(os.path.join(out, "index", "process", "handoff.yaml"), encoding="utf-8"))
     assert_true("stage2_pending" not in cat, "catalog 不应有 stage2_pending")
     assert_true("deferred" not in cat["documents"][0], "clean doc 不应有 deferred")
     assert_eq(hdata["stage2_pending"], [], "无 defer 时 handoff stage2_pending 应为空列表")
@@ -170,7 +226,7 @@ def test_handoff_yaml_complete():
     in_dir = make_tmp_input({"x.txt": "text\n"})
     out = make_tmp_output()
     pipeline.run(in_dir, out)
-    hpath = os.path.join(out, "index", "handoff.yaml")
+    hpath = os.path.join(out, "index", "process", "handoff.yaml")
     assert_true(os.path.isfile(hpath), "handoff.yaml 应存在")
     data = yaml.safe_load(open(hpath, encoding="utf-8"))
     assert_eq(data["producer"]["name"], "doc2md")
@@ -202,7 +258,7 @@ def test_catalog_has_audience_header():
     in_dir = make_tmp_input({"x.txt": "text\n"})
     out = make_tmp_output()
     pipeline.run(in_dir, out)
-    txt = open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8").read()
+    txt = open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8").read()
     assert_true("面向" in txt, "catalog.yaml 应有面向对象注释")
     assert_true("handoff" in txt, "catalog 应引导 stage2 agent 读 handoff.yaml")
     cleanup(in_dir, out)
@@ -269,7 +325,7 @@ def test_contract_lists_all_types():
     in_dir = make_tmp_input({"x.txt": "text\n"})
     out = make_tmp_output()
     pipeline.run(in_dir, out)
-    data = yaml.safe_load(open(os.path.join(out, "index", "handoff.yaml"), encoding="utf-8"))
+    data = yaml.safe_load(open(os.path.join(out, "index", "process", "handoff.yaml"), encoding="utf-8"))
     contract = set(data["deferred_contract"])
     assert_eq(contract, set(DEFER_TYPES), "契约类型应与 DEFER_TYPES 完全一致")
     assert_true("termination" in data, "handoff 应有终止条件说明")

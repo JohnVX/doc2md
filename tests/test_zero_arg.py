@@ -57,7 +57,7 @@ def test_zero_arg_finds_config():
         with _chdir(root):
             rc = cli.main([])
         assert_eq(rc, 0)
-        cat = yaml.safe_load(open(os.path.join(out_dir, "index", "catalog.yaml"), encoding="utf-8"))
+        cat = yaml.safe_load(open(os.path.join(out_dir, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
         assert_true("cat1" in cat["categories"], "应使用 config.yaml 分类")
     finally:
         cleanup(root)
@@ -121,7 +121,7 @@ def test_zero_arg_picks_most_docs():
             rc = cli.main([])
         assert_eq(rc, 0)
         # aaa 有 3 个文档, bbb 有 1 个 -> 选 aaa
-        src_cat = os.path.join(root, "knowledge", "index", "catalog.yaml")
+        src_cat = os.path.join(root, "knowledge", "index", "artifact", "catalog.yaml")
         import yaml as _y
         cat = _y.safe_load(open(src_cat, encoding="utf-8"))
         assert_eq(len(cat["documents"]), 3, "应处理 aaa 的 3 个文件")

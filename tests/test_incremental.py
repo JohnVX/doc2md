@@ -77,7 +77,7 @@ def test_format_becomes_unsupported_deferred():
     mds = find_mds(out)
     assert_eq(len(mds), 1)
     assert_true("stage2" in open(mds[0], encoding="utf-8").read())
-    man = yaml.safe_load(open(os.path.join(out, "index", ".manifest.yaml"), encoding="utf-8"))
+    man = yaml.safe_load(open(os.path.join(out, "index", "process", ".manifest.yaml"), encoding="utf-8"))
     assert_eq(len(man["entries"]), 1, "manifest 仍保留该条目(defer)")
     cleanup(in_dir, out)
 
@@ -98,7 +98,7 @@ def test_reclassification_prunes_old_md():
     # 同一 doc-id 的 md 只应在新类目(attack-surface)存在一份, 旧类目无孤儿
     assert_eq(len(mds), 1, "应只剩新类目下一份 md")
     assert_true("attack-surface" in mds[0], f"应在 attack-surface 目录, 实际: {mds[0]}")
-    cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+    cat = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     assert_true("attack-surface" in cat["categories"])
     cleanup(in_dir, out)
 

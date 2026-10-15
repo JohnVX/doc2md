@@ -19,8 +19,8 @@ log = logging.getLogger("catalog")
 _CATALOG_HEADER = (
     "# catalog.yaml — 资料库导航索引\n"
     "# 面向: 业务 agent (按类目/标题/摘要定位文档; 章节结构见各 md 文件目录)\n"
-    "# 每文档的 deferred 字段为上下文(该文档有哪些未处理项); 聚合工作单在 handoff.yaml\n"
-    "# stage2 agent 请先读 index/handoff.yaml 获取交接说明与工作项\n\n"
+    "# 每文档的 deferred 字段为上下文(该文档有哪些未处理项); 聚合工作单在 index/process/handoff.yaml\n"
+    "# stage2 agent 请先读 index/process/handoff.yaml 获取交接说明与工作项\n\n"
 )
 
 _HANDOFF_HEADER = (
@@ -56,9 +56,9 @@ _HANDOFF_STATIC = {
             "action": "多模态理解图片, 提取语义描述或文字",
         },
         "inline-image": {
-            "where": "md body 中 <!-- stage2:inline-image=N --> 标记, 紧随该页文字内容; 具体页码见该项 locs (如 p3)",
-            "source": "original-doc/<relpath> (PDF 原件, 按推断的页号定位图片)",
-            "action": "提取图内文字或描述图内容",
+            "where": "md body 中 <!-- stage2:inline-image=N unit=page --> 标记, 紧随该页文字内容; 所在页由紧邻上方的 <!-- page:M --> 锚点确定, 具体页码亦见该项 locs (如 p3)",
+            "source": "original-doc/<relpath> (PDF 原件, 按锚点页号定位图片)",
+            "action": "提取图内文字或描述图内容; unit=page 表示本页 N 张图可合并为一次本页图示汇总",
         },
         "scan-page": {
             "where": "md body 中 <!-- stage2:scan-page=N --> 标记; 紧邻上方有 ![扫描页](path) 引用, path 指向 original-doc/<doc-id>_assets/scan*.png",
@@ -105,9 +105,9 @@ _HANDOFF_STATIC = {
         "从 stage2_pending 取一个工作项 (id + doc + source + deferred)",
         "按 deferred 中的 type 查 deferred_contract, 获取 where(标记与原件定位) / source(原件在哪) / action(该做什么)",
         "打开工作项 doc 路径的 md 文件, 用正则 <!-- stage2:type=N --> 找到该 type 的所有标记 (可能多个, 逐个处理)",
-        "对每个标记: 按 where 定位原件 (图片类跟随紧邻上方的 ![](path) 引用; PDF/xlsx 等读 source 原件), 执行 action, 将结果替换该标记",
+        "对每个标记: 按 where 定位原件 (图片类跟随紧邻上方的 ![](path) 引用; PDF/xlsx 等读 source 原件), 执行 action, 将结果替换该标记。若标记带 unit=page/slide/para, 表示该处 N 项共享一个语义容器——可在容器粒度做一次汇总替换(其余位置标 '见上'), 不必逐项重复同一内容",
         "该 type 全部标记替换后, 四处同步更新: md body(已替换) + front-matter deferred(移除该项) + catalog.yaml 该文档 deferred(移除该项) + handoff.yaml stage2_pending(移除该工作项)",
-        "若某项确实无法处理(如无解密能力/无对应解析器): 不要假装完成。在该工作项下加 blocked: <原因> 并保留标记与 deferred 字段, 继续处理其他项",
+        "若某项确实无法处理(如无解密能力/无对应解析器): 不要假装完成。在该工作项下加 blocked 对象 {reason, toolNeeded, retryable} 并保留标记与 deferred 字段, 继续处理其他项",
         "重复步骤 1-5 直到 stage2_pending 为空 (或只剩 blocked 项)",
     ],
     "termination": {
@@ -115,23 +115,31 @@ _HANDOFF_STATIC = {
         "blocked": "存在无法处理的项时停下并上报, 不静默丢弃、不假装完成; blocked 项保留在 stage2_pending 供人工介入",
         "idempotent": "重复运行安全: 已替换的标记不再匹配正则, 不会重复处理",
     },
+    "blocked_format": {
+        "shape": "blocked: {reason: <str>, toolNeeded: <str|null>, retryable: <bool>}",
+        "reason": "自由文本, 说明为何无法处理",
+        "toolNeeded": "理论上可解但当前缺的工具/能力 (如 'libreoffice'/'OCR引擎'/'解密口令'); 无则为 null",
+        "retryable": "补齐 toolNeeded 后能否自动重试: true=可自动重试, false=需人工介入",
+    },
+    "marker_fields": "标记可选带 unit / class 修饰: <!-- stage2:type=N [unit=page|slide|para] [class=diagram|chart|photo|screenshot|formula] note -->. unit 表示 N 项共享的语义容器(供聚合处理); class 表示内容类别(免探测). 无该修饰时按普通标记处理",
     "loc_field": "deferred 项可含 locs (定位线索列表, 如 ['p3','sheet:销售']). 标记已在正文原位置时(如 docx 公式紧跟所在段落), 无需 locs; 汇总型标记(PDF 内嵌图/pptx 图表/xlsx 截断)带 locs 指明页号或 sheet 名",
     "output_guide": {
         "md_body": "替换 docs/<category>/<doc-id>.md 中的 <!-- stage2: --> 标记为实际内容",
         "front_matter": "同步更新该 md 的 front-matter deferred 字段 (移除已处理项)",
-        "catalog": "同步更新 catalog.yaml 中该文档的 deferred 字段",
-        "handoff": "从 handoff.yaml 的 stage2_pending 中移除已处理项",
+        "catalog": "同步更新 index/artifact/catalog.yaml 中该文档的 deferred 字段",
+        "handoff": "从 index/process/handoff.yaml 的 stage2_pending 中移除已处理项",
         "originals": "原件保留不动 (original-doc/ 是只读兜底)",
-        "marker_format": r"所有标记格式为 <!-- stage2:type=count note -->, 可用正则 <!-- stage2:([\w-]+)=(\d+)(?:\s+(.*?))? --> 统一提取",
+        "marker_format": r"所有标记格式为 <!-- stage2:type=count [unit=U] [class=C] note -->, 可用正则 <!-- stage2:([\w-]+)=(\d+)((?:\s+\w+=[\w-]+)*)(?:\s+(.*?))? --> 统一提取 (组: type/count/修饰字段/note)",
     },
     "layout": {
-        "catalog": "index/catalog.yaml",
-        "handoff": "index/handoff.yaml",
-        "manifest": "index/.manifest.yaml",
+        "catalog": "index/artifact/catalog.yaml",
+        "handoff": "index/process/handoff.yaml",
+        "manifest": "index/process/.manifest.yaml",
         "docs": "docs/<category>/<doc-id>.md",
         "originals": "original-doc/<relpath>",
         "assets": "original-doc/<doc-id>_assets/",
     },
+    "layout_note": "index/ 分两类: artifact/ 为产物索引(下游长期使用, 如 catalog.yaml); process/ 为过程索引(供 stage2 补全的台账, 如 handoff.yaml/.manifest.yaml, 补全完成后可归档或弃用)",
 }
 
 
@@ -169,7 +177,7 @@ def _check_contract_consistency():
 
 
 def build_catalog(entries, output_root):
-    """entries: manifest 全量值 (list[dict]). 写 index/catalog.yaml (纯导航 + 每文档 deferred 上下文)."""
+    """entries: manifest 全量值 (list[dict]). 写 index/artifact/catalog.yaml (纯导航 + 每文档 deferred 上下文)."""
     by_cat = {}
     docs = []
     for e in entries:
@@ -195,7 +203,7 @@ def build_catalog(entries, output_root):
         "categories": {c: sorted(ids) for c, ids in by_cat.items()},
         "documents": docs,
     }
-    path = Path(output_root) / "index" / "catalog.yaml"
+    path = Path(output_root) / "index" / "artifact" / "catalog.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     util.write_text(path, _CATALOG_HEADER + yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
     log.info("catalog 写入: %s (%d 文档)", path, len(docs))
@@ -203,12 +211,12 @@ def build_catalog(entries, output_root):
 
 
 def build_handoff(entries, output_root):
-    """写 index/handoff.yaml — stage1→stage2 交接说明 + stage2_pending 工作项."""
+    """写 index/process/handoff.yaml — stage1→stage2 交接说明 + stage2_pending 工作项."""
     _check_contract_consistency()
     pending = _collect_stage2_pending(entries)
     data = copy.deepcopy(_HANDOFF_STATIC)
     data["stage2_pending"] = pending
-    path = Path(output_root) / "index" / "handoff.yaml"
+    path = Path(output_root) / "index" / "process" / "handoff.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     util.write_text(path, _HANDOFF_HEADER + yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
     log.info("handoff 写入: %s (%d 待 stage2)", path, len(pending))

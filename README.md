@@ -84,7 +84,7 @@ doc2md/
 ├── detector.py     内容签名格式识别 (按二进制签名/zip 内部结构判定)
 ├── parsers/        各格式解析器 (统一签名, 统一返回结构)
 │   ├── __init__.py   解析器注册表 (handler 名 -> parse 函数)
-│   ├── _common.py    共享: md 表格 / defer 标记 / 聚合
+│   ├── _common.py    共享: md 表格 / defer 标记 / 聚合 / 图片类别推断
 │   ├── docx.py       Word: 段落/表格/列表/内嵌图/公式图表检测
 │   ├── pptx.py       PowerPoint: 分组递归/slide/表格/备注/图片
 │   ├── pdf.py        PDF: 大纲/文字块排序/表格/跨页样板剔除/扫描页渲染
@@ -95,7 +95,7 @@ doc2md/
 ├── ocr.py          OCR 封装: 单例引擎 + 失败缓存 + WMF/EMF 跳过
 ├── denoise.py      去噪 + 抽取式摘要 + 章节索引 + front-matter
 ├── config.py       配置加载 + 通用分类 (mapping>keywords>default)
-├── catalog.py      catalog.yaml + handoff.yaml 生成
+├── catalog.py      artifact/catalog.yaml + process/handoff.yaml 生成
 ├── manifest.py     增量 manifest (SHA256 跳过/删除清理)
 ├── util.py         工具: sha256 / doc-id / slugify / save_asset / write_text(LF)
 └── _build.py       构建时间戳 (安装时生成; 源码哈希由 cli._code_hash 运行时算)
@@ -214,15 +214,19 @@ config 默认 `-1` = 不写该项 → ORT 用全部核心）。修复必须
 ```
 <输出目录>/
 ├── index/
-│   ├── catalog.yaml          # 导航索引 (业务 agent)
-│   ├── handoff.yaml          # 交接说明 + 工作单 (stage2 agent)
-│   └── .manifest.yaml        # 增量记录 (内部)
+│   ├── artifact/             # 产物索引 (下游长期使用)
+│   │   └── catalog.yaml      # 导航索引 (业务 agent)
+│   └── process/              # 过程索引 (供 stage2 补全, 完成即弃)
+│       ├── handoff.yaml      # 交接说明 + 工作单 (stage2 agent)
+│       └── .manifest.yaml    # 增量记录 (内部)
 ├── docs/
 │   └── <类目>/<doc-id>.md    # 正文 Markdown (带 front-matter)
 └── original-doc/
     ├── <原文件相对路径>       # 源文件原样兜底
     └── <doc-id>_assets/      # 提取的内嵌图 (供 OCR / stage2)
 ```
+
+`index/` 按**生命周期**分两类：`artifact/`（产物索引，下游长期使用）与 `process/`（过程索引，供 stage2 补全的台账，补全完成后可归档或弃用）。下游业务 agent 只需读 `artifact/catalog.yaml`，不必接触 `process/` 下的过程文件。
 
 ### catalog.yaml — 导航索引
 
@@ -255,9 +259,17 @@ config 默认 `-1` = 不写该项 → ORT 用全部核心）。修复必须
 | `unsupported` | stage1 不支持的格式 |
 | `parse-failed` | 解析失败 |
 
-正文标记可用正则统一提取：`<!-- stage2:([\w-]+)=(\d+)(?:\s+(.*?))? -->`
+正文标记格式：`<!-- stage2:type=count [unit=U] [class=C] note -->`
 
-同一文档内多个同类型项经 `aggregate_deferred` 合并（count 求和）；若各项带 `loc` 定位线索（PDF 页号 / xlsx sheet 名），合并为 `locs` 列表，**位置不丢**。无待处理项的文档不输出 `deferred` 字段，不产生噪声。
+- **`count`** 恒为**待办项数**（需 stage2 处理的条目数），不是批次编号 / 容器大小。
+- **`unit`** 可选，表示 N 项共享的**语义容器**（`page` / `slide` / `para`）。如 PDF 一页 8 张图 → `unit=page`，下游可把 8 项**聚合为一次处理**（本页图示汇总），不必逐项重复。
+- **`class`** 可选，表示内容类别（`diagram` / `chart` / `photo` / `screenshot` / `formula`），让 stage2 免探测即知处理方式。仅在能从字节/扩展名可靠推断时输出，否则省略（不编造类别）。
+
+**结构锚点**：PDF 正文每页前插 `<!-- page:N -->`（与 pptx 的 `## Slide N` 对齐）；pptx 用 `## Slide N`。锚点无条件保留——stage1 已知页边界，保留成本≈零，让下游自建所需抽象（stage2 免靠 locs 顺序臆测页对应）。
+
+同一文档内多个同类型项会合并（count 求和），各项的定位线索（PDF 页号 / xlsx sheet 名）汇总为 `locs` 列表，**位置不丢**。无待处理项的文档不输出 `deferred` 字段，不产生噪声。
+
+**`blocked` 结构化**：stage2 无法处理某项时，在该工作项下加 `blocked: {reason, toolNeeded, retryable}` 而非自由文本——`reason`（为何无法处理）/ `toolNeeded`（缺的工具/能力，无则 null）/ `retryable`（补齐后能否自动重试）。供后续 agent 自动重试。
 
 **契约与代码的一致性**：handoff 的 `deferred_contract` 与代码内的 `DEFER_TYPES` 由启动时校验 + 回归测试守护，不会出现“代码有类型、契约无说明”。
 
@@ -265,7 +277,7 @@ config 默认 `-1` = 不写该项 → ORT 用全部核心）。修复必须
 
 1. **md body** — 标记替换为实际内容
 2. **md front-matter 的 `deferred`** — 移除该项
-3. **catalog.yaml 该文档的 `deferred`** — 移除该项
+3. **artifact/catalog.yaml 该文档的 `deferred`** — 移除该项
 4. **handoff.yaml 的 `stage2_pending`** — 移除该工作项
 
 ---
@@ -389,7 +401,7 @@ python tests/run_all.py          # 退出码 0=全过，1=有失败
 python tests/run_all.py -v        # 详细（含失败堆栈）
 ```
 
-用例覆盖：格式识别、各格式解析正确性、OCR（引擎失败缓存/正向出字/ProcessPool/WMF-EMF 跳过）、去噪、分类优先级、路径校验、损坏文件、中断保存、增量全链路、deferred 结构化、零参数 CLI、batch 模式输出一致性、加密 PDF defer、PPTX 内容（标题/正文/表格/备注）、特殊文件名、多 sheet xlsx、GBK 编码、代码文件围栏、verbose 模式、收尾异常不中断、并行确定性、系统资源限制、产物质量回退（表格转义/占位标题/表格摘要/PDF 跨页样板剔除/PPTX 箭头不计 defer）、图片 defer 原因一致性、子进程日志配置。
+用例覆盖：格式识别、各格式解析正确性、OCR（引擎失败缓存/正向出字/ProcessPool/WMF-EMF 跳过）、去噪、分类优先级、路径校验、损坏文件、中断保存、增量全链路、deferred 结构化、零参数 CLI、batch 模式输出一致性、加密 PDF defer、PPTX 内容（标题/正文/表格/备注）、特殊文件名、多 sheet xlsx、GBK 编码、代码文件围栏、verbose 模式、收尾异常不中断、并行确定性、系统资源限制、产物质量回退（表格转义/占位标题/表格摘要/PDF 跨页样板剔除/PPTX 箭头不计 defer）、图片 defer 原因一致性、图片类别推断、子进程日志配置。
 
 ### 跨平台确定性验证
 
@@ -400,8 +412,8 @@ python tests/run_all.py -v        # 详细（含失败堆栈）
 | 比对项 | 方法 | 结果 |
 |--------|------|------|
 | 文件清单 | `find` 路径集 | 一致 |
-| `index/catalog.yaml`、`handoff.yaml` | 逐文件 diff（排除 `generated_at`） | 一致 |
-| `index/.manifest.yaml` | 逐文件 diff（源文件 sha256） | 一致 |
+| `index/artifact/catalog.yaml`、`index/process/handoff.yaml` | 逐文件 diff（排除 `generated_at`） | 一致 |
+| `index/process/.manifest.yaml` | 逐文件 diff（源文件 sha256） | 一致 |
 | `docs/**/*.md`（13 篇） | 逐文件 diff + OCR 文本块单独比对 | 一致 |
 | `original-doc/**`（原件 + 图片） | 全文件 sha256 | 一致 |
 
@@ -452,7 +464,7 @@ stage 1 原则：**确定性工作总是有益、对后续无害**。
 ```bash
 pip install -e .                       # 注册 doc2md 命令
 doc2md                                 # 零参数: 自动定位 input-examples, 输出到 ./knowledge/
-cat knowledge/index/catalog.yaml       # 看导航索引
-cat knowledge/index/handoff.yaml       # 看 stage2 交接说明
+cat knowledge/index/artifact/catalog.yaml    # 看导航索引
+cat knowledge/index/process/handoff.yaml     # 看 stage2 交接说明
 python tests/run_all.py                # 跑回归测试
 ```

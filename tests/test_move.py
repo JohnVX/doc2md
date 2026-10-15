@@ -21,7 +21,7 @@ def test_move_mode_consumes_input():
     assert_true(os.path.exists(os.path.join(out, "original-doc", "a.txt")))
     assert_true(os.path.exists(os.path.join(out, "original-doc", "b.txt")))
     assert_eq(len(find_mds(out)), 2)
-    cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+    cat = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     assert_eq(len(cat["documents"]), 2)
     cleanup(in_dir, out)
 

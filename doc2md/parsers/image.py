@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 from .. import util
-from ._common import defer
+from ._common import defer, guess_image_class
 
 
 def parse(path, ctx=None):
@@ -29,5 +29,6 @@ def parse(path, ctx=None):
     if dest:
         body = f"![{stem}]({ref})\n\n<!-- ocr:img:{dest} -->"
     else:
-        body = f"![{stem}]({ref})\n\n" + defer(deferred, "image-ocr", 1, "无引擎或纯图无文字") + "\n"
+        body = f"![{stem}]({ref})\n\n" + defer(deferred, "image-ocr", 1, "无引擎或纯图无文字",
+                                                cls=guess_image_class(blob, stem)) + "\n"
     return {"title": stem, "body": body, "tags": [], "meta": {}, "deferred": deferred}

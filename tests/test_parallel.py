@@ -23,13 +23,13 @@ def test_parallel_determinism():
     in1 = make_tmp_input(corpus)
     out1 = make_tmp_output()
     pipeline.run(in1, out1)
-    cat1 = yaml.safe_load(open(os.path.join(out1, "index", "catalog.yaml"), encoding="utf-8"))
+    cat1 = yaml.safe_load(open(os.path.join(out1, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     docs1 = [(d["id"], d["title"]) for d in cat1["documents"]]
 
     in2 = make_tmp_input(corpus)
     out2 = make_tmp_output()
     pipeline.run(in2, out2)
-    cat2 = yaml.safe_load(open(os.path.join(out2, "index", "catalog.yaml"), encoding="utf-8"))
+    cat2 = yaml.safe_load(open(os.path.join(out2, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     docs2 = [(d["id"], d["title"]) for d in cat2["documents"]]
 
     assert_eq(len(docs1), len(docs2), "文档数应一致")
@@ -51,7 +51,7 @@ def test_parallel_many_files_ordered():
     in_dir = make_tmp_input(corpus)
     out = make_tmp_output()
     pipeline.run(in_dir, out)
-    cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+    cat = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     titles = [d["title"] for d in cat["documents"]]
     expected = [f"file_{i:02d}" for i in range(10)]
     assert_eq(titles, expected, "文档顺序应按文件名排序")

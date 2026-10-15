@@ -19,7 +19,7 @@ def test_e2e_smoke():
     p, _, e = pipeline.run(in_dir, out)
     assert_eq(e, 0, "不应有失败")
     assert_eq(p, len(expected), "全部样本应被处理")
-    cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+    cat = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     assert_eq(len(cat["documents"]), len(expected))
     for fn in expected:
         assert_true(os.path.exists(os.path.join(out, "original-doc", fn)), f"{fn} 未拷贝")
@@ -35,10 +35,10 @@ def test_incremental_stable_ids():
     in_dir = make_tmp_input({"x.txt": "内容\n"})
     out = make_tmp_output()
     pipeline.run(in_dir, out)
-    man = yaml.safe_load(open(os.path.join(out, "index", ".manifest.yaml"), encoding="utf-8"))
+    man = yaml.safe_load(open(os.path.join(out, "index", "process", ".manifest.yaml"), encoding="utf-8"))
     id1 = man["entries"][0]["id"]
     pipeline.run(in_dir, out)  # 重跑(跳过)
-    man = yaml.safe_load(open(os.path.join(out, "index", ".manifest.yaml"), encoding="utf-8"))
+    man = yaml.safe_load(open(os.path.join(out, "index", "process", ".manifest.yaml"), encoding="utf-8"))
     id2 = man["entries"][0]["id"]
     assert_eq(id1, id2, "doc-id 应稳定")
     cleanup(in_dir, out)
@@ -52,7 +52,7 @@ def test_front_matter_valid_and_consistent():
     in_dir = make_tmp_input({"note.txt": "一段内容用于校验 front-matter\n"})
     out = make_tmp_output()
     pipeline.run(in_dir, out)
-    cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+    cat = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     doc = cat["documents"][0]
     fm = parse_front_matter(open(os.path.join(out, doc["doc"]), encoding="utf-8").read())
     for k in ("id", "title", "category", "source", "source_type"):
@@ -70,7 +70,7 @@ def test_catalog_lean_and_toc_rendered():
     in_dir = make_tmp_input({"note.md": body})
     out = make_tmp_output()
     pipeline.run(in_dir, out)
-    cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+    cat = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     doc = cat["documents"][0]
     assert_true("toc" not in doc, "catalog 不应含 toc 字段")
     assert_true("sections" not in doc, "catalog 不应含 sections 字段")
@@ -80,7 +80,7 @@ def test_catalog_lean_and_toc_rendered():
     txt = open(os.path.join(out, doc["doc"]), encoding="utf-8").read()
     assert_true("## 目录" in txt, ">=6 标题的文档应有顶部目录")
     # manifest 也不应含 toc/sections
-    man = yaml.safe_load(open(os.path.join(out, "index", ".manifest.yaml"), encoding="utf-8"))
+    man = yaml.safe_load(open(os.path.join(out, "index", "process", ".manifest.yaml"), encoding="utf-8"))
     me = man["entries"][0]
     assert_true("toc" not in me, "manifest 不应含 toc 字段")
     assert_true("sections" not in me, "manifest 不应含 sections 字段")

@@ -57,18 +57,18 @@ def test_delete_then_readd_docid_stable():
     in_dir = make_tmp_input({"doc.txt": "content\n"})
     out = make_tmp_output()
     pipeline.run(in_dir, out)
-    cat1 = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+    cat1 = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     id1 = cat1["documents"][0]["id"]
     # 删文件
     os.remove(os.path.join(in_dir, "doc.txt"))
     pipeline.run(in_dir, out)
-    cat2 = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+    cat2 = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     assert_eq(len(cat2["documents"]), 0, "删除后应无文档")
     # 加回同名同内容
     with open(os.path.join(in_dir, "doc.txt"), "w", encoding="utf-8") as f:
         f.write("content\n")
     pipeline.run(in_dir, out)
-    cat3 = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+    cat3 = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     id3 = cat3["documents"][0]["id"]
     assert_eq(id1, id3, f"doc-id 应稳定: {id1} == {id3}")
     cleanup(in_dir, out)
@@ -87,7 +87,7 @@ def test_config_change_reclassifies():
         f.write("taxonomy: [attack, safe]\ndefault_category: safe\n"
                 "keywords:\n  attack: [漏洞, exploit]\n")
     pipeline.run(in_dir, out, cfg1)
-    cat1 = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+    cat1 = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     assert_eq(cat1["documents"][0]["category"], "attack")
     # 第二次: 改 config, 同文件归 safe (关键词变)
     cfg2 = os.path.join(out, "_cfg2.yaml")
@@ -95,7 +95,7 @@ def test_config_change_reclassifies():
         f.write("taxonomy: [attack, safe]\ndefault_category: safe\n"
                 "keywords:\n  safe: [漏洞]\n")  # 漏洞现在归 safe
     pipeline.run(in_dir, out, cfg2)
-    cat2 = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+    cat2 = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     assert_eq(cat2["documents"][0]["category"], "safe", "改 config 后应重新分类")
     # 旧类目目录应无残留 md
     old_md = os.path.join(out, "docs", "attack")
@@ -121,7 +121,7 @@ def test_simultaneous_add_delete_modify():
     p, s, e = pipeline.run(in_dir, out)
     assert_eq(e, 0)
     assert_eq(len(find_mds(out)), 3, "应剩 3 个 md (keep+mod+new)")
-    cat = yaml.safe_load(open(os.path.join(out, "index", "catalog.yaml"), encoding="utf-8"))
+    cat = yaml.safe_load(open(os.path.join(out, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
     titles = [d["title"] for d in cat["documents"]]
     assert_true("del" not in str(titles).lower() or "delete" not in str(titles).lower(),
                 "del.txt 应被清理")

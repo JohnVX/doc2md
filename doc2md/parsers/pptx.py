@@ -9,7 +9,7 @@
 from pathlib import Path
 
 from .. import util
-from ._common import defer, is_placeholder, render_table
+from ._common import defer, guess_image_class, is_placeholder, render_table
 
 
 def parse(path, ctx=None):
@@ -137,7 +137,7 @@ def _render_slide(idx, slide, ctx, deferred):
     if unhandled:
         # loc 记录 slide 号: stage2 据此定位到具体幻灯片 (标记已在 slide 内, 位置准确)
         items.append(defer(deferred, "chart", unhandled, "图表/SmartArt等未提取",
-                           loc=f"slide:{idx}"))
+                           loc=f"slide:{idx}", cls="chart", unit="slide"))
 
     # 备注
     try:
@@ -180,4 +180,5 @@ def _handle_picture(sh, no, ctx, items, deferred):
     if dest:
         items.append(f"![图{no}]({ref})\n\n<!-- ocr:img:{dest} -->")
     else:
-        items.append(defer(deferred, "image-ocr", 1, "图片未存盘"))
+        items.append(defer(deferred, "image-ocr", 1, "图片未存盘",
+                           cls=guess_image_class(blob, ext)))

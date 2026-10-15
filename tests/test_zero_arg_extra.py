@@ -63,7 +63,7 @@ def test_config_in_input_dir():
             rc = cli.main([])
         assert_eq(rc, 0)
         import yaml
-        cat = yaml.safe_load(open(os.path.join(out_dir, "index", "catalog.yaml"), encoding="utf-8"))
+        cat = yaml.safe_load(open(os.path.join(out_dir, "index", "artifact", "catalog.yaml"), encoding="utf-8"))
         assert_true("custom" in cat["categories"], "应使用输入目录的 config")
         cleanup(root)
     except Exception:

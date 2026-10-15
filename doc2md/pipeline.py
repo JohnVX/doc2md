@@ -29,7 +29,7 @@ import yaml
 
 from . import catalog, denoise, detector, manifest, ocr, parsers, util
 from .config import load_config
-from .parsers._common import aggregate_deferred, defer
+from .parsers._common import aggregate_deferred, defer, guess_image_class
 
 log = logging.getLogger("pipeline")
 
@@ -469,12 +469,22 @@ def _post_ocr(body, out, doc_id, deferred_list):
         return body
 
     def defer_reason(m, reason=None):
-        """构造 defer 标记 (无 OCR 文本时). reason 为空则不带 note."""
+        """构造 defer 标记 (无 OCR 文本时). reason 为空则不带 note.
+
+        cls 从资产字节推断 (与 parser 侧同口径), 让 stage2 免探测即知
+        该用何方式处理 (diagram/chart/photo/screenshot).
+        """
         ocr_type = m.group(1)
         dtype = "scan-page" if ocr_type == "scan" else "image-ocr"
+        cls = ""
+        try:
+            blob = (adir / m.group(2)).read_bytes()
+            cls = guess_image_class(blob, m.group(2))
+        except Exception:
+            pass
         if reason:
-            return defer(deferred_list, dtype, 1, reason)
-        return defer(deferred_list, dtype, 1)
+            return defer(deferred_list, dtype, 1, reason, cls=cls)
+        return defer(deferred_list, dtype, 1, cls=cls)
 
     def empty_text_reason(m):
         """OCR 结果为空的真正原因 (就地重判, 避免并行 worker 丢信息).
@@ -854,10 +864,11 @@ def run(input_dir, output_dir, config_path=None, move=False, verbose=False):
         pass
 
     conf = load_config(config_path)
-    (out / "index").mkdir(parents=True, exist_ok=True)
+    (out / "index" / "process").mkdir(parents=True, exist_ok=True)
+    (out / "index" / "artifact").mkdir(parents=True, exist_ok=True)
     (out / "docs").mkdir(parents=True, exist_ok=True)
     (out / "original-doc").mkdir(parents=True, exist_ok=True)
-    man = manifest.Manifest(out / "index" / ".manifest.yaml")
+    man = manifest.Manifest(out / "index" / "process" / ".manifest.yaml")
 
     files = [p for p in in_dir.rglob("*") if p.is_file() and not p.name.startswith(".")]
     files.sort(key=lambda p: str(p).lower())

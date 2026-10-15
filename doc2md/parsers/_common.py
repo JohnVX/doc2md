@@ -16,24 +16,67 @@ DEFER_TYPES = frozenset({
 })
 
 
-def defer(deferred, type, count=1, note="", loc=""):
+def guess_image_class(blob=b"", ext="", filter_name=""):
+    """从图片字节/扩展名/PDF filter 弱推断内容类别 (diagram/chart/photo/screenshot).
+
+    诚实说明: 仅凭字节无法可靠区分图表与示意图, 故只用有区分度的信号;
+    无法判断时返回空串 (标记不输出 class, 下游自行探测). 不编造类别。
+
+    ext 可以是裸扩展名 ("png") 或文件名 ("01_img.png"); 内部取最后一个点后的段.
+
+    信号:
+      ext/filter 为 JPEG(DCTDecode/jpg) -> 多为照片 (photo)
+      矢量格式 (svg/emf/wmf)            -> 图示 (diagram)
+      PNG/GIF 等无损位图                  -> 截图/图表候选 (screenshot)
+    """
+    e = (ext or "").lower().strip()
+    if "." in e:
+        e = e.rsplit(".", 1)[1]
+    f = (filter_name or "").lower()
+    head = blob[:12] if blob else b""
+    if e in ("svg", "emf", "wmf") or head[:4] == b"\x01\x00\x00\x00":
+        return "diagram"
+    if e in ("jpg", "jpeg") or f in ("dctdecode", "jpxdecode") or head[:3] == b"\xff\xd8\xff":
+        return "photo"
+    if e in ("png", "gif", "bmp", "tif", "tiff", "webp"):
+        # 无损位图: 截图/图表/示意图均可能, 给最保守的 screenshot
+        return "screenshot"
+    return ""
+
+
+def defer(deferred, type, count=1, note="", loc="", cls="", unit=""):
     """记录结构化 deferred 项并返回标准化 stage2 标记串.
 
-    标记格式: <!-- stage2:{type}={count} {note} -->
-    可用正则统一提取: re.findall(r'<!-- stage2:([\\w-]+)=(\\d+)(?:\\s+(.*?))? -->', body)
+    标记格式: <!-- stage2:{type}={count} [unit={unit}] [class={cls}] {note} -->
+    可统一提取: re.findall(r'<!-- stage2:([\w-]+)=(\d+)((?:\s+\w+=[\w-]+)*)(?:\s+(.*?))? -->', body)
 
-    deferred: list, 调用方传入, 本函数 append 一项 {type, count, note, loc}.
+    语义约定 (关键, 避免下游误算工作量):
+      count —— 恒为"待办项数"(需 stage2 处理的条目数), 不是批次编号/容器大小.
+      unit  —— 可选"共享容器"类型(page/slide/section). 当同一容器内多项共享一次
+               语义替换时标注 (如 PDF 一页 8 张图 -> count=8 unit=page). 下游可据此
+               把 count 项"聚合为一次处理", 避免逐项重复填同页内容.
+      cls   —— 可选"内容类别"(diagram/chart/photo/screenshot/formula), 让 stage2
+               免探测即知该图该用什么方式处理.
+
+    deferred: list, 调用方传入, 本函数 append 一项 {type, count, note, loc, cls, unit}.
     loc: 可选定位线索 (如 PDF 页号 'p3' / xlsx 'sheet:销售' / docx 段落序),
-         供 stage2 在文件中定位该项; 不体现在正文标记里 (标记只留 note),
-         仅用于 front-matter/catalog/handoff 的结构化定位.
+         供 stage2 在文件中定位该项; 不体现在正文标记里, 仅用于 front-matter/catalog/handoff.
     返回: 标准化标记字符串, 拼入 body 即可.
     """
     note = (note or "").replace("-->", "").replace("\n", " ").strip()
     item = {"type": type, "count": count, "note": note}
     if loc:
         item["loc"] = loc
+    if cls:
+        item["cls"] = cls
+    if unit:
+        item["unit"] = unit
     deferred.append(item)
     tag = f"<!-- stage2:{type}={count}"
+    if unit:
+        tag += f" unit={unit}"
+    if cls:
+        tag += f" class={cls}"
     if note:
         tag += f" {note}"
     return tag + " -->"
@@ -44,6 +87,7 @@ def aggregate_deferred(items):
 
     locs 保留全部定位线索 (去重, 按出现序) —— 同类型多项分布在不同位置时不丢位置.
     仅当某项有 loc 时输出 locs 字段, 不产生空字段噪声.
+    cls/unit 同 type 下应一致 (由 parser 保证), 取首次出现的值.
     """
     by_type = {}
     for it in items:
@@ -52,8 +96,16 @@ def aggregate_deferred(items):
             by_type[t]["count"] += it["count"]
             if not by_type[t]["note"] and it.get("note"):
                 by_type[t]["note"] = it["note"]
+            if not by_type[t].get("cls") and it.get("cls"):
+                by_type[t]["cls"] = it["cls"]
+            if not by_type[t].get("unit") and it.get("unit"):
+                by_type[t]["unit"] = it["unit"]
         else:
             by_type[t] = {"type": t, "count": it["count"], "note": it.get("note", "")}
+            if it.get("cls"):
+                by_type[t]["cls"] = it["cls"]
+            if it.get("unit"):
+                by_type[t]["unit"] = it["unit"]
             if it.get("loc"):
                 by_type[t]["_locs"] = []
         loc = it.get("loc")
