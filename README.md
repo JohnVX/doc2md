@@ -303,7 +303,7 @@ config 默认 `-1` = 不写该项 → ORT 用全部核心）。修复必须
 
 EMF/WMF/SVG 是 Office 文档里的矢量图（Visio/SmartArt/剪贴画），原始格式多模态模型与 OCR 引擎都读不了。stage1 做格式归一化（不涉及“理解”）：渲染为 PNG 位图再走普通图片流程，下游即可直接使用。
 
-渲染按可用性降级，任一成功即可：**Windows 下 Pillow 原生支持**（GDI，零依赖）；Linux/macOS 则需可选工具 **LibreOffice** 或 **Inkscape**。都没有时保留原矢量 + `deferred` 标记（note 说明缺何能力）交 stage2，不阻断流程。
+渲染按可用性降级，任一成功即可：**Windows 下 Pillow 原生支持**（GDI，零依赖）；Linux/macOS 则依次尝试 **LibreOffice**、**Inkscape**、**emf2png**（Inkscape + JuNest/proot 封装，自带白底合成，适合无特权/不可装包环境）。都没有时保留原矢量 + `deferred` 标记（note 说明缺何能力）交 stage2，不阻断流程。
 
 **摘要**：抽取式——取首个像正文的段落（跳过标题/图片/注释/引用/表格行/纯列表，代码块内行不参与），截断 200 字。
 

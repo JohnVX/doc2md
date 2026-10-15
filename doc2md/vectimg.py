@@ -9,7 +9,8 @@
   Windows: Pillow 原生支持 (GDI 渲染, Image.core.drawwmf), **零依赖**即可.
            Pillow 官方文档: "On Windows, it can read WMF and EMF files."
   Linux:   Pillow 无该能力 (drawwmf 仅 Windows 编译), 需外部工具
-           (LibreOffice / Inkscape) 作为可选增强.
+           (LibreOffice / Inkscape / emf2png — 后者为 Inkscape+JuNest 封装,
+           自带白底合成, 适合无特权/不可装包环境) 作为可选增强.
 
 设计: 逐个途径尝试, 任一成功即返回 PNG 字节; 全部不可用返回 None (上层 defer).
 """
@@ -143,6 +144,32 @@ def _render_with_inkscape(blob, ext, dpi=DEFAULT_DPI, timeout=60):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _render_with_emf2png(blob, ext, dpi=DEFAULT_DPI, timeout=120):
+    """途径 4: emf2png 封装脚本 (Inkscape + JuNest/proot, 白底 PNG).
+
+    适用无特权/不可装包环境: emf2png 内部以 proot 隔离跑 Inkscape 导出,
+    再用 ImageMagick 合成白底 (透明底会被多模态模型渲染成黑底, 故需白底).
+    不可用/失败返回 None.
+    """
+    tool = _find_tool(["emf2png"])
+    if not tool:
+        return None
+    e = _ext_of(ext)
+    tmp = tempfile.mkdtemp(prefix="doc2md_e2p_")
+    try:
+        src = os.path.join(tmp, f"in.{e}")
+        out = os.path.join(tmp, "out.png")
+        with open(src, "wb") as f:
+            f.write(blob)
+        if not _run([tool, src, out, str(dpi)], timeout=timeout):
+            return None
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return open(out, "rb").read()
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _ext_of(ext):
     e = (ext or "").lower()
     if "." in e:
@@ -150,15 +177,35 @@ def _ext_of(ext):
     return e or "emf"
 
 
+def _sniff_vector_ext(blob, ext):
+    """按字节签名推断矢量真实格式, 覆盖(可能错的)扩展名.
+
+    设计哲学一致性: "内容优于扩展名". 实际遇到 .wmf 扩展名但内容是 EMF 的文件,
+    渲染器按扩展名解析会失败, 而字节签名可靠 --- 故以签名为准.
+    """
+    if not blob:
+        return _ext_of(ext)
+    if blob[:4] == b"\xd7\xcd\xc6\x9a":       # WMF (placeable)
+        return "wmf"
+    if blob[:4] == b"\x01\x00\x00\x00" and len(blob) > 44 and blob[40:44] == b" EMF":
+        return "emf"
+    if blob[:5] == b"<?xml" or blob[:4] == b"<svg":  # SVG
+        return "svg"
+    return _ext_of(ext)
+
+
 def render_vector(blob, ext="", dpi=DEFAULT_DPI):
     """把矢量图渲染为 PNG 字节; 全部途径失败返回 None.
 
-    途径顺序: Pillow (Windows 零依赖优先) → LibreOffice → Inkscape.
+    途径顺序: Pillow (Windows 零依赖优先) → LibreOffice → Inkscape → emf2png.
     调用方应在返回 None 时降级 (defer 给 stage2).
+    渲染前按字节签名校正扩展名 (内容优于扩展名).
     """
     if not blob:
         return None
-    for fn in (_render_with_pillow, _render_with_libreoffice, _render_with_inkscape):
+    ext = _sniff_vector_ext(blob, ext)
+    for fn in (_render_with_pillow, _render_with_libreoffice,
+               _render_with_inkscape, _render_with_emf2png):
         try:
             png = fn(blob, ext, dpi)
         except Exception as e:
@@ -182,4 +229,6 @@ def available_renderers():
         out.append("libreoffice")
     if _find_tool(["inkscape"]):
         out.append("inkscape")
+    if _find_tool(["emf2png"]):
+        out.append("emf2png")
     return out

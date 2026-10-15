@@ -63,16 +63,17 @@ CASES.append(("render_falls_through_to_success", test_render_falls_through_to_su
 def test_render_none_when_all_fail():
     """所有途径失败 -> 返回 None (上层据此 defer)."""
     saved = (vectimg._render_with_pillow, vectimg._render_with_libreoffice,
-             vectimg._render_with_inkscape)
+             vectimg._render_with_inkscape, vectimg._render_with_emf2png)
     try:
         vectimg._render_with_pillow = lambda *a, **k: None
         vectimg._render_with_libreoffice = lambda *a, **k: None
         vectimg._render_with_inkscape = lambda *a, **k: None
+        vectimg._render_with_emf2png = lambda *a, **k: None
         assert_true(vectimg.render_vector(_SYNTH_EMF, "emf") is None,
                     "全部失败应返回 None")
     finally:
         (vectimg._render_with_pillow, vectimg._render_with_libreoffice,
-         vectimg._render_with_inkscape) = saved
+         vectimg._render_with_inkscape, vectimg._render_with_emf2png) = saved
 
 
 CASES.append(("render_none_when_all_fail", test_render_none_when_all_fail))
@@ -124,13 +125,14 @@ def test_vector_image_parser_keeps_ext_on_failure():
     """渲染失败时: 保留原扩展名 (不把矢量伪装成 .png)."""
     from doc2md.parsers import image as img_parser
     saved = (vectimg._render_with_pillow, vectimg._render_with_libreoffice,
-             vectimg._render_with_inkscape)
+             vectimg._render_with_inkscape, vectimg._render_with_emf2png)
     out = make_tmp_output()
     try:
         ind = make_tmp_input({"b.emf": _SYNTH_EMF})
         vectimg._render_with_pillow = lambda *a, **k: None
         vectimg._render_with_libreoffice = lambda *a, **k: None
         vectimg._render_with_inkscape = lambda *a, **k: None
+        vectimg._render_with_emf2png = lambda *a, **k: None
         ctx = {"output_root": out, "doc_id": "doc-y", "relpath": "b.emf"}
         img_parser.parse(os.path.join(ind, "b.emf"), ctx)
         adir = os.path.join(out, "original-doc", "doc-y_assets")
@@ -140,7 +142,7 @@ def test_vector_image_parser_keeps_ext_on_failure():
         assert_true(any(n.endswith(".emf") for n in names), "应保留 .emf 扩展名")
     finally:
         (vectimg._render_with_pillow, vectimg._render_with_libreoffice,
-         vectimg._render_with_inkscape) = saved
+         vectimg._render_with_inkscape, vectimg._render_with_emf2png) = saved
         cleanup(out)
 
 
@@ -173,7 +175,7 @@ def test_save_asset_renders_vector_centrally():
     """
     from doc2md import util
     saved = (vectimg._render_with_pillow, vectimg._render_with_libreoffice,
-             vectimg._render_with_inkscape)
+             vectimg._render_with_inkscape, vectimg._render_with_emf2png)
     out = make_tmp_output()
     try:
         # 有渲染能力: 存 vec.png (真 PNG)
@@ -189,6 +191,7 @@ def test_save_asset_renders_vector_centrally():
         vectimg._render_with_pillow = lambda *a, **k: None
         vectimg._render_with_libreoffice = lambda *a, **k: None
         vectimg._render_with_inkscape = lambda *a, **k: None
+        vectimg._render_with_emf2png = lambda *a, **k: None
         ctx2 = {"output_root": out, "doc_id": "d2"}
         dest2, _ = util.save_asset(_SYNTH_EMF, ctx2, "emf")
         assert_eq("01_img.emf", dest2, "渲染失败应保留原扩展名")
@@ -200,7 +203,7 @@ def test_save_asset_renders_vector_centrally():
         assert_eq("01_img.png", dest3, "普通 PNG 走原样保存")
     finally:
         (vectimg._render_with_pillow, vectimg._render_with_libreoffice,
-         vectimg._render_with_inkscape) = saved
+         vectimg._render_with_inkscape, vectimg._render_with_emf2png) = saved
         cleanup(out)
 
 
@@ -217,3 +220,78 @@ def test_vec_prefix_classifies_as_diagram():
 
 
 CASES.append(("vec_prefix_classifies_as_diagram", test_vec_prefix_classifies_as_diagram))
+
+
+def test_emf2png_path_uses_tool_and_reads_output():
+    """emf2png 途径: 找到工具则调用并读取其输出 PNG; 找不到工具返回 None.
+
+    不依赖真实 emf2png (mock _find_tool/_run), 任何环境可跑.
+    """
+    import tempfile
+    saved_find, saved_run = vectimg._find_tool, vectimg._run
+    try:
+        # 无 emf2png 工具 -> None
+        vectimg._find_tool = lambda names: None
+        assert_true(vectimg._render_with_emf2png(_SYNTH_EMF, "emf") is None,
+                    "无工具应返回 None")
+
+        # 有工具且执行成功 -> 读取输出 PNG
+        def fake_run(cmd, timeout=60):
+            # cmd = [tool, src, out, dpi]; 写出 PNG 到 out
+            with open(cmd[2], "wb") as f:
+                f.write(_fake_png())
+            return True
+        vectimg._find_tool = lambda names: "/fake/emf2png"
+        vectimg._run = fake_run
+        r = vectimg._render_with_emf2png(_SYNTH_EMF, "emf")
+        assert_true(r is not None and r[:8] == b"\x89PNG\r\n\x1a\n",
+                    "应返回工具产出的 PNG")
+
+        # 工具执行失败 -> None
+        vectimg._run = lambda cmd, timeout=60: False
+        assert_true(vectimg._render_with_emf2png(_SYNTH_EMF, "emf") is None,
+                    "命令失败应返回 None")
+    finally:
+        vectimg._find_tool, vectimg._run = saved_find, saved_run
+
+
+CASES.append(("emf2png_path_uses_tool_and_reads_output",
+              test_emf2png_path_uses_tool_and_reads_output))
+
+
+def test_available_renderers_reports_emf2png():
+    """available_renderers 应报告 emf2png (存在时)."""
+    saved_find = vectimg._find_tool
+    try:
+        vectimg._find_tool = lambda names: ("/x/emf2png" if "emf2png" in names else None)
+        assert_true("emf2png" in vectimg.available_renderers(),
+                    "应报告 emf2png 可用")
+    finally:
+        vectimg._find_tool = saved_find
+
+
+CASES.append(("available_renderers_reports_emf2png",
+              test_available_renderers_reports_emf2png))
+
+
+def test_sniff_ext_overrides_wrong_extension():
+    """按字节签名校正扩展名: .wmf 扩展名但内容为 EMF, 渲染前按 emf 处理.
+
+    动机: 实测遇到扩展名为 .wmf 实为 EMF 的文件, 按扩展名解析会失败;
+    内容签名可靠 -> 以签名为准 (与 is_vector_blob 的判据一致).
+    """
+    # 内容为 EMF, 却传 ext="wmf"
+    assert_eq("emf", vectimg._sniff_vector_ext(_SYNTH_EMF, "wmf"),
+              "EMF 签名应覆盖 .wmf 扩展名")
+    # 内容为 WMF, 传 ext="emf"
+    assert_eq("wmf", vectimg._sniff_vector_ext(_SYNTH_WMF, "emf"),
+              "WMF 签名应覆盖 .emf 扩展名")
+    # 签名未知时回退扩展名
+    assert_eq("svg", vectimg._sniff_vector_ext(b"unknown", "svg"),
+              "签名未知回退扩展名")
+    assert_eq("emf", vectimg._sniff_vector_ext(b"", ""),
+              "空输入回退默认 emf")
+
+
+CASES.append(("sniff_ext_overrides_wrong_extension",
+              test_sniff_ext_overrides_wrong_extension))
