@@ -295,3 +295,67 @@ def test_sniff_ext_overrides_wrong_extension():
 
 CASES.append(("sniff_ext_overrides_wrong_extension",
               test_sniff_ext_overrides_wrong_extension))
+
+
+def test_normalize_png_flattens_transparency_to_white():
+    """归一化: RGBA/LA/P 透明底 -> 白底非透明 RGB; RGB 幂等."""
+    import io as _io
+    from PIL import Image
+    # RGBA 透明背景 -> 压白底
+    im = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+    im.putpixel((4, 4), (255, 0, 0, 255))
+    buf = _io.BytesIO(); im.save(buf, "PNG")
+    out = vectimg._normalize_png(buf.getvalue())
+    o = Image.open(_io.BytesIO(out))
+    assert_eq("RGB", o.mode, "应转为 RGB")
+    assert_eq((255, 255, 255), o.getpixel((0, 0)), "透明区应变白")
+
+    # 已是 RGB -> 幂等 (仍 RGB, 尺寸不变)
+    im2 = Image.new("RGB", (5, 6), (10, 20, 30))
+    buf2 = _io.BytesIO(); im2.save(buf2, "PNG")
+    out2 = vectimg._normalize_png(buf2.getvalue())
+    o2 = Image.open(_io.BytesIO(out2))
+    assert_eq(("RGB", (5, 6)), (o2.mode, o2.size), "RGB 应幂等保留")
+
+
+CASES.append(("normalize_png_flattens_transparency_to_white",
+              test_normalize_png_flattens_transparency_to_white))
+
+
+def test_normalize_png_failsafe_returns_original():
+    """归一化失败安全: 无法解析的字节原样返回 (宁带 alpha 也不丢图)."""
+    bad = b"\x89PNG-not-really"
+    assert_true(vectimg._normalize_png(bad) == bad, "损坏数据应原样返回")
+    assert_true(vectimg._normalize_png(None) is None, "None 应返回 None")
+    assert_true(vectimg._normalize_png(b"") == b"", "空应返回空")
+
+
+CASES.append(("normalize_png_failsafe_returns_original",
+              test_normalize_png_failsafe_returns_original))
+
+
+def test_render_vector_normalizes_any_renderer_output():
+    """render_vector 出口统一归一化: 即使途径返回透明 PNG, 出口也是白底 RGB.
+
+    这是"一致可靠"的关键: 不依赖各途径自身是否压白底.
+    """
+    import io as _io
+    from PIL import Image
+    saved = vectimg._render_with_pillow
+    try:
+        # mock 一个"透明底"渲染器 (模拟 Inkscape/LibreOffice)
+        def rgba_png(*a, **k):
+            im = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+            buf = _io.BytesIO(); im.save(buf, "PNG")
+            return buf.getvalue()
+        vectimg._render_with_pillow = rgba_png
+        r = vectimg.render_vector(_SYNTH_EMF, "emf")
+        o = Image.open(_io.BytesIO(r))
+        assert_eq("RGB", o.mode, "出口应归一化为 RGB")
+        assert_eq((255, 255, 255), o.getpixel((0, 0)), "出口应为白底")
+    finally:
+        vectimg._render_with_pillow = saved
+
+
+CASES.append(("render_vector_normalizes_any_renderer_output",
+              test_render_vector_normalizes_any_renderer_output))

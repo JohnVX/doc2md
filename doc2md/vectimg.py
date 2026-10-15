@@ -13,6 +13,8 @@
            自带白底合成, 适合无特权/不可装包环境) 作为可选增强.
 
 设计: 逐个途径尝试, 任一成功即返回 PNG 字节; 全部不可用返回 None (上层 defer).
+      渲染前按字节签名校正扩展名; 渲染后统一归一化为白底非透明 RGB PNG
+      (不依赖各途径是否压白底, 保证下游拿到的规格一致、可直接阅读).
 """
 import logging
 import os
@@ -194,12 +196,44 @@ def _sniff_vector_ext(blob, ext):
     return _ext_of(ext)
 
 
+def _normalize_png(png):
+    """把渲染产物归一化为**白底非透明 RGB PNG** (保证各途径产出规格一致).
+
+    动机: 不同渲染途径产出模式不同 (Inkscape/LibreOffice 常为 RGBA 透明底,
+    多模态模型/查看器可能把透明渲染成黑底 -> 图片几乎不可见)。统一压白底,
+    下游拿到的一律可直接阅读。
+
+    失败安全: 归一化本身出错时返回**原始 PNG** (宁带 alpha 也不丢图)。
+    """
+    if not png:
+        return png
+    try:
+        import io
+        from PIL import Image
+        with Image.open(io.BytesIO(png)) as im:
+            has_alpha = im.mode in ("RGBA", "LA") or (
+                im.mode == "P" and "transparency" in im.info)
+            if has_alpha:
+                im = im.convert("RGBA")
+                bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
+                bg.paste(im, (0, 0), im)
+                im = bg
+            im = im.convert("RGB")
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            return buf.getvalue()
+    except Exception as e:
+        log.debug("PNG 归一化失败, 返回原图: %s", e)
+        return png
+
+
 def render_vector(blob, ext="", dpi=DEFAULT_DPI):
     """把矢量图渲染为 PNG 字节; 全部途径失败返回 None.
 
     途径顺序: Pillow (Windows 零依赖优先) → LibreOffice → Inkscape → emf2png.
     调用方应在返回 None 时降级 (defer 给 stage2).
-    渲染前按字节签名校正扩展名 (内容优于扩展名).
+    渲染前按字节签名校正扩展名 (内容优于扩展名)。
+    渲染后统一归一化为白底非透明 RGB PNG (保证各途径产出一致)。
     """
     if not blob:
         return None
@@ -212,7 +246,7 @@ def render_vector(blob, ext="", dpi=DEFAULT_DPI):
             log.debug("%s 渲染异常: %s", fn.__name__, e)
             png = None
         if png:
-            return png
+            return _normalize_png(png)
     return None
 
 
